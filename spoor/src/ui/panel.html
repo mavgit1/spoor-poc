@@ -1,0 +1,456 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Spoor</title>
+  <style>
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+    body {
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+      background: #1a1a2e; color: #eee;
+      min-height: 100vh; padding: 12px; font-size: 13px;
+    }
+    .card {
+      background: #16213e; border-radius: 10px; padding: 14px;
+      box-shadow: 0 4px 20px rgba(0,0,0,0.3); margin-bottom: 12px;
+    }
+    h1 { font-size: 1.1rem; color: #00b894; margin-bottom: 6px; }
+    h2 { font-size: 0.95rem; color: #dfe6e9; margin-bottom: 8px; }
+    .hint { font-size: 0.75rem; color: #b2bec3; line-height: 1.35; margin-bottom: 10px; }
+    .status-row { display: flex; align-items: center; gap: 6px; margin-bottom: 6px; }
+    .dot { width: 8px; height: 8px; border-radius: 50%; background: #636e72; flex-shrink: 0; }
+    .dot.recording { background: #00b894; animation: pulse 1.5s infinite; }
+    .dot.analyzing { background: #fdcb6e; }
+    @keyframes pulse { 0%,100% { opacity: 1; } 50% { opacity: 0.4; } }
+    .counter { font-size: 0.8rem; color: #b2bec3; margin-bottom: 10px; }
+    .buttons { display: flex; flex-wrap: wrap; gap: 8px; }
+    button, .download-link {
+      border: none; border-radius: 6px; padding: 8px 12px;
+      font-size: 0.8rem; font-weight: 600; cursor: pointer;
+      text-decoration: none; display: inline-block;
+    }
+    button:disabled { opacity: 0.4; cursor: not-allowed; }
+    .btn-primary { background: #00b894; color: #1a1a2e; }
+    .btn-danger { background: #d63031; color: #fff; }
+    .btn-accent { background: #6c5ce7; color: #fff; }
+    .btn-download { background: #0984e3; color: #fff; display: none; }
+    .btn-link {
+      background: transparent; color: #74b9ff; padding: 4px 0;
+      font-weight: 500; font-size: 0.75rem;
+    }
+    .toolbar { display: flex; align-items: center; gap: 10px; margin-bottom: 8px; flex-wrap: wrap; }
+    .api-list {
+      max-height: 300px; overflow-y: auto;
+      display: flex; flex-direction: column; gap: 8px; margin-bottom: 10px;
+    }
+    .api-group {
+      background: #1a1a2e; border: 1px solid #2d3436; border-radius: 8px;
+    }
+    .api-head {
+      display: flex; align-items: center; gap: 8px;
+      padding: 10px; cursor: pointer;
+    }
+    .api-head input[type=checkbox] { flex-shrink: 0; }
+    .api-info { flex: 1; min-width: 0; }
+    .api-title { font-weight: 600; line-height: 1.3; word-break: break-word; }
+    .api-meta { font-size: 0.7rem; color: #636e72; margin-top: 2px; }
+    .tag {
+      display: inline-block; padding: 1px 5px; border-radius: 3px;
+      font-size: 0.65rem; flex-shrink: 0;
+    }
+    .tag.rest { background: #0984e3; }
+    .tag.graphql { background: #e17055; }
+    .expand-btn {
+      background: transparent; color: #74b9ff; border: none;
+      font-size: 0.7rem; padding: 4px 6px; cursor: pointer; flex-shrink: 0;
+    }
+    .ops-list {
+      border-top: 1px solid #2d3436; padding: 6px 10px 8px;
+      display: none; flex-direction: column; gap: 6px;
+    }
+    .ops-list.open {
+      display: flex;
+      max-height: 200px;
+      overflow-y: auto;
+      -webkit-overflow-scrolling: touch;
+    }
+    .op-row {
+      display: flex; flex-direction: column; gap: 4px;
+      padding: 6px 0; border-bottom: 1px solid #2d3436;
+    }
+    .op-row:last-child { border-bottom: none; }
+    .op-head { display: flex; align-items: flex-start; gap: 8px; }
+    .op-name { flex: 1; font-size: 0.8rem; font-weight: 500; }
+    .op-count { font-size: 0.65rem; color: #00b894; }
+    .pattern-row label {
+      display: block; font-size: 0.65rem; color: #b2bec3; margin-bottom: 3px;
+    }
+    .pattern-input {
+      width: 100%; background: #16213e; border: 1px solid #2d3436;
+      color: #eee; border-radius: 4px; padding: 5px 7px; font-size: 0.75rem;
+    }
+    #curation { display: none; }
+    .error { color: #ff7675; font-size: 0.75rem; margin-top: 8px; min-height: 1.2em; }
+  </style>
+</head>
+<body>
+  <div class="card">
+    <h1>Spoor</h1>
+    <p class="hint">Record, stop, then select whole APIs to export. Expand an API to tweak individual operations.</p>
+    <div class="status-row">
+      <div class="dot" id="status-dot"></div>
+      <span id="status-text">Stopped</span>
+    </div>
+    <div class="counter" id="flow-count">0 requests captured</div>
+    <div class="buttons">
+      <button id="start-btn" class="btn-primary">Start</button>
+      <button id="stop-btn" class="btn-danger" disabled>Stop</button>
+    </div>
+    <div class="error" id="error"></div>
+  </div>
+
+  <div class="card" id="curation">
+    <h2>APIs</h2>
+    <div class="toolbar">
+      <button type="button" class="btn-link" id="select-all-btn">Select all APIs</button>
+      <button type="button" class="btn-link" id="select-none-btn">Select none</button>
+      <span id="selected-count" style="color:#b2bec3;font-size:0.75rem;"></span>
+    </div>
+    <div class="api-list" id="api-list"></div>
+    <div class="buttons">
+      <button id="generate-btn" class="btn-accent" disabled>Generate</button>
+      <a id="download-btn" class="download-link btn-download" href="/api/download" download="spoor-export.zip">Download zip</a>
+    </div>
+  </div>
+
+  <script>
+    const dot = document.getElementById('status-dot');
+    const statusText = document.getElementById('status-text');
+    const flowCount = document.getElementById('flow-count');
+    const startBtn = document.getElementById('start-btn');
+    const stopBtn = document.getElementById('stop-btn');
+    const generateBtn = document.getElementById('generate-btn');
+    const downloadBtn = document.getElementById('download-btn');
+    const errorEl = document.getElementById('error');
+    const curation = document.getElementById('curation');
+    const apiList = document.getElementById('api-list');
+    const selectAllBtn = document.getElementById('select-all-btn');
+    const selectNoneBtn = document.getElementById('select-none-btn');
+    const selectedCountEl = document.getElementById('selected-count');
+
+    let allCandidates = [];
+    let apiGroups = [];
+    let loadedCandidateCount = -1;
+    let wasAnalyzing = false;
+    let candidatesLoaded = false;
+    const expandedApis = new Set();
+    /** @type {Map<string, {checked: boolean, pattern: string}>} */
+    const opState = new Map();
+
+    function apiKey(origin, protocol) {
+      return `${origin}|${protocol}`;
+    }
+
+    function buildApiGroups(candidates) {
+      const map = new Map();
+      for (const c of candidates) {
+        const key = apiKey(c.origin, c.protocol);
+        if (!map.has(key)) {
+          map.set(key, { key, origin: c.origin, protocol: c.protocol, ops: [], totalRequests: 0 });
+        }
+        const g = map.get(key);
+        g.ops.push(c);
+        g.totalRequests += c.request_count ?? 0;
+      }
+      return [...map.values()].sort((a, b) => b.totalRequests - a.totalRequests);
+    }
+
+    function isOpChecked(id) {
+      return opState.get(id)?.checked ?? false;
+    }
+
+    function setOpChecked(id, checked, pattern) {
+      const prev = opState.get(id);
+      opState.set(id, {
+        checked,
+        pattern: pattern ?? prev?.pattern ?? '',
+      });
+    }
+
+    /** Persist pattern edits only — never read checked state from DOM (stale when collapsed). */
+    function syncPatternsFromDom() {
+      apiList.querySelectorAll('.op-row').forEach(row => {
+        const id = row.dataset.id;
+        const pattern = row.querySelector('.pattern-input')?.value;
+        if (!id) return;
+        const prev = opState.get(id);
+        opState.set(id, {
+          checked: prev?.checked ?? false,
+          pattern: pattern ?? prev?.pattern ?? '',
+        });
+      });
+    }
+
+    function setGroupOps(group, checked) {
+      for (const op of group.ops) {
+        const prev = opState.get(op.id);
+        setOpChecked(op.id, checked, prev?.pattern || op.guessed_pattern);
+      }
+    }
+
+    function groupCheckState(group) {
+      const checked = group.ops.filter(op => isOpChecked(op.id)).length;
+      if (checked === 0) return 'none';
+      if (checked === group.ops.length) return 'all';
+      return 'partial';
+    }
+
+    function updateSelectedCount() {
+      const selectedOps = allCandidates.filter(c => isOpChecked(c.id)).length;
+      const selectedApis = apiGroups.filter(g => groupCheckState(g) === 'all').length;
+      const partialApis = apiGroups.filter(g => groupCheckState(g) === 'partial').length;
+      let text = `${selectedOps} of ${allCandidates.length} operations`;
+      if (apiGroups.length) {
+        text += ` · ${selectedApis} API(s) full`;
+        if (partialApis) text += `, ${partialApis} partial`;
+      }
+      selectedCountEl.textContent = text;
+    }
+
+    function renderApiGroups() {
+      syncPatternsFromDom();
+      apiList.innerHTML = '';
+
+      for (const group of apiGroups) {
+        const state = groupCheckState(group);
+        const expanded = expandedApis.has(group.key);
+        const protocolLabel = group.protocol === 'graphql' ? 'GraphQL' : 'REST';
+        const opLabel = group.protocol === 'graphql' ? 'operations' : 'endpoints';
+
+        const el = document.createElement('div');
+        el.className = 'api-group';
+        el.dataset.apiKey = group.key;
+
+        const apiCb = document.createElement('input');
+        apiCb.type = 'checkbox';
+        apiCb.className = 'api-cb';
+        apiCb.checked = state === 'all';
+        apiCb.indeterminate = state === 'partial';
+
+        const expandBtn = document.createElement('button');
+        expandBtn.type = 'button';
+        expandBtn.className = 'expand-btn';
+        expandBtn.textContent = expanded ? '▾' : '▸';
+        expandBtn.title = 'Show individual operations';
+
+        const head = document.createElement('div');
+        head.className = 'api-head';
+        head.innerHTML = `
+          <div class="api-info">
+            <div class="api-title">${escapeHtml(protocolLabel)} API</div>
+            <div class="api-meta">${escapeHtml(group.origin)} · ${group.ops.length} ${opLabel} · ${group.totalRequests}×</div>
+          </div>
+          <span class="tag ${escapeHtml(group.protocol)}">${escapeHtml(group.protocol)}</span>
+        `;
+        head.prepend(apiCb);
+        head.appendChild(expandBtn);
+
+        const opsList = document.createElement('div');
+        opsList.className = 'ops-list' + (expanded ? ' open' : '');
+
+        for (const op of group.ops) {
+          const saved = opState.get(op.id);
+          const checked = saved ? saved.checked : false;
+          const pattern = saved?.pattern || op.guessed_pattern;
+          const row = document.createElement('div');
+          row.className = 'op-row';
+          row.dataset.id = op.id;
+          row.innerHTML = `
+            <div class="op-head">
+              <input type="checkbox" class="op-cb" ${checked ? 'checked' : ''}>
+              <span class="op-name">${escapeHtml(op.label)}</span>
+              <span class="op-count">${op.request_count ?? 0}×</span>
+            </div>
+            <div class="pattern-row">
+              <label>Pattern</label>
+              <input type="text" class="pattern-input" value="${escapeAttr(pattern)}">
+            </div>
+          `;
+          const opCb = row.querySelector('.op-cb');
+          opCb.addEventListener('change', () => {
+            setOpChecked(op.id, opCb.checked, row.querySelector('.pattern-input').value);
+            refreshGroupCheckbox(group.key);
+            updateSelectedCount();
+          });
+          row.querySelector('.pattern-input').addEventListener('input', (e) => {
+            setOpChecked(op.id, opCb.checked, e.target.value);
+          });
+          opsList.appendChild(row);
+        }
+
+        apiCb.addEventListener('click', (e) => e.stopPropagation());
+        apiCb.addEventListener('change', () => {
+          setGroupOps(group, apiCb.checked);
+          renderApiGroups();
+        });
+
+        expandBtn.addEventListener('click', (e) => {
+          e.stopPropagation();
+          if (expandedApis.has(group.key)) expandedApis.delete(group.key);
+          else expandedApis.add(group.key);
+          renderApiGroups();
+        });
+
+        head.addEventListener('click', (e) => {
+          if (e.target === apiCb || e.target === expandBtn) return;
+          expandBtn.click();
+        });
+
+        el.appendChild(head);
+        el.appendChild(opsList);
+        apiList.appendChild(el);
+      }
+      updateSelectedCount();
+    }
+
+    function refreshGroupCheckbox(key) {
+      const group = apiGroups.find(g => g.key === key);
+      if (!group) return;
+      const el = apiList.querySelector(`[data-api-key="${CSS.escape(key)}"]`);
+      const apiCb = el?.querySelector('.api-cb');
+      if (!apiCb) return;
+      const state = groupCheckState(group);
+      apiCb.checked = state === 'all';
+      apiCb.indeterminate = state === 'partial';
+    }
+
+    async function loadCandidatesOnce() {
+      const res = await fetch('/api/candidates');
+      if (!res.ok) return;
+      const data = await res.json();
+      allCandidates = data.candidates || [];
+      apiGroups = buildApiGroups(allCandidates);
+      curation.style.display = apiGroups.length ? 'block' : 'none';
+      candidatesLoaded = true;
+      renderApiGroups();
+    }
+
+    async function poll() {
+      try {
+        const res = await fetch('/api/status');
+        if (!res.ok) throw new Error(`HTTP ${res.status}`);
+        const data = await res.json();
+        const discoverJustFinished = wasAnalyzing && !data.analyzing && !data.recording;
+        wasAnalyzing = data.analyzing;
+        updateUI(data);
+        if (discoverJustFinished) {
+          opState.clear();
+          expandedApis.clear();
+          candidatesLoaded = false;
+          loadedCandidateCount = -1;
+        }
+        if (!data.recording && !data.analyzing && data.candidate_count > 0) {
+          if (!candidatesLoaded || data.candidate_count !== loadedCandidateCount) {
+            await loadCandidatesOnce();
+            loadedCandidateCount = data.candidate_count;
+          }
+        }
+      } catch (e) {
+        errorEl.textContent = 'Cannot reach server — is spoor running?';
+      }
+    }
+
+    function updateUI(data) {
+      errorEl.textContent = '';
+      const apiCount = apiGroups.length;
+      const gOps = data.graphql_ops ?? 0;
+      const rOps = data.rest_endpoints ?? 0;
+      let line = `${data.flow_count} captured`;
+      if (!data.recording && !data.analyzing && data.candidate_count > 0) {
+        line += ` · ${apiCount || '?'} API(s) · ${gOps} GraphQL / ${rOps} REST`;
+        if (rOps === 0 && (data.traffic_rest ?? 0) === 0) {
+          line += ' — no REST traffic matched';
+        }
+      } else if (data.candidate_count > 0) {
+        line += ` · ${data.candidate_count} ops`;
+      }
+      flowCount.textContent = line;
+      dot.className = 'dot';
+      if (data.recording) { dot.classList.add('recording'); statusText.textContent = 'Recording'; }
+      else if (data.analyzing) { dot.classList.add('analyzing'); statusText.textContent = 'Discovering…'; }
+      else statusText.textContent = 'Ready';
+      startBtn.disabled = data.recording || data.analyzing;
+      stopBtn.disabled = !data.recording;
+      downloadBtn.style.display = data.spec_ready ? 'inline-block' : 'none';
+      generateBtn.disabled = data.recording || data.analyzing || !candidatesLoaded;
+    }
+
+    async function post(path, body) {
+      errorEl.textContent = '';
+      const opts = { method: 'POST' };
+      if (body !== undefined) {
+        opts.headers = { 'Content-Type': 'application/json' };
+        opts.body = JSON.stringify(body);
+      }
+      const res = await fetch(path, opts);
+      if (!res.ok) {
+        errorEl.textContent = await res.text() || res.statusText;
+        return false;
+      }
+      return true;
+    }
+
+    generateBtn.addEventListener('click', async () => {
+      syncPatternsFromDom();
+      const selected = allCandidates
+        .filter(c => isOpChecked(c.id))
+        .map(c => ({
+          id: c.id,
+          pattern: opState.get(c.id)?.pattern || c.guessed_pattern || null,
+        }));
+      if (!selected.length) {
+        errorEl.textContent = 'Select at least one API or operation';
+        return;
+      }
+      if (await post('/api/generate', { selected, ignore_patterns: [] })) await poll();
+    });
+
+    selectAllBtn.addEventListener('click', () => {
+      for (const g of apiGroups) setGroupOps(g, true);
+      renderApiGroups();
+    });
+    selectNoneBtn.addEventListener('click', () => {
+      for (const g of apiGroups) setGroupOps(g, false);
+      renderApiGroups();
+    });
+
+    startBtn.addEventListener('click', async () => {
+      opState.clear();
+      expandedApis.clear();
+      candidatesLoaded = false;
+      loadedCandidateCount = -1;
+      curation.style.display = 'none';
+      allCandidates = [];
+      apiGroups = [];
+      apiList.innerHTML = '';
+      downloadBtn.style.display = 'none';
+      if (await post('/api/start')) await poll();
+    });
+
+    stopBtn.addEventListener('click', async () => {
+      if (await post('/api/stop')) await poll();
+    });
+
+    function escapeHtml(s) {
+      return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');
+    }
+    function escapeAttr(s) {
+      return String(s).replace(/"/g,'&quot;').replace(/</g,'&lt;');
+    }
+
+    poll();
+    setInterval(poll, 1500);
+  </script>
+</body>
+</html>

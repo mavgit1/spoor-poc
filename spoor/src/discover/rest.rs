@@ -1,0 +1,111 @@
+use std::collections::{BTreeMap, BTreeSet};
+
+use regex::Regex;
+
+use crate::classify::api_origins;
+use crate::classify::{ClassifiedEntry, Protocol};
+use crate::discover::{confidence_str, protocol_str};
+use crate::rest::path_matching;
+use crate::types::Candidate;
+
+pub fn discover(classified: &[ClassifiedEntry]) -> Vec<Candidate> {
+    let custom_regex = Regex::new(r"^[0-9a-fA-F-]{8,}$").ok();
+
+    let api_origins = api_origins::from_classified(classified);
+
+    let mut paths_by_origin: BTreeMap<String, BTreeSet<String>> = BTreeMap::new();
+    for item in classified.iter().filter(|c| c.protocol == Protocol::Rest) {
+        if !api_origins.contains(&item.entry.origin) {
+            continue;
+        }
+        paths_by_origin
+            .entry(item.entry.origin.clone())
+            .or_default()
+            .insert(item.entry.path.clone());
+    }
+
+    let mut candidates = Vec::new();
+    for (origin, paths) in paths_by_origin {
+        let paths_vec: Vec<String> = paths.into_iter().collect();
+        let suggested = path_matching::suggest_param_templates(&paths_vec, custom_regex.as_ref());
+
+        for template in suggested {
+            let methods: BTreeSet<String> = classified
+                .iter()
+                .filter(|c| c.protocol == Protocol::Rest && c.entry.origin == origin)
+                .filter(|c| path_matches_template(&c.entry.path, &template))
+                .map(|c| c.entry.flow.method.to_uppercase())
+                .collect();
+
+            if methods.is_empty() {
+                continue;
+            }
+
+            let example_entry = classified
+                .iter()
+                .find(|c| {
+                    c.protocol == Protocol::Rest
+                        && c.entry.origin == origin
+                        && path_matches_template(&c.entry.path, &template)
+                })
+                .cloned();
+
+            let Some(example_entry) = example_entry else {
+                continue;
+            };
+
+            let method_list: Vec<String> = methods.into_iter().collect();
+            let primary_method = method_list[0].clone();
+            let id = format!("rest|{origin}|{primary_method}|{template}");
+            let conf = example_entry.confidence;
+            let request_count = classified
+                .iter()
+                .filter(|c| c.protocol == Protocol::Rest && c.entry.origin == origin)
+                .filter(|c| path_matches_template(&c.entry.path, &template))
+                .count();
+
+            candidates.push(Candidate {
+                id,
+                label: format!("{primary_method} {template}"),
+                protocol: protocol_str(Protocol::Rest).to_string(),
+                guessed_pattern: template,
+                example: format!(
+                    "{} {}",
+                    example_entry.entry.flow.method.to_uppercase(),
+                    example_entry.entry.flow.url
+                ),
+                host: origin
+                    .trim_start_matches("https://")
+                    .trim_start_matches("http://")
+                    .to_string(),
+                methods: method_list,
+                confidence: confidence_str(conf).to_string(),
+                origin: origin.clone(),
+                request_count,
+            });
+        }
+    }
+
+    candidates
+}
+
+fn path_matches_template(path: &str, template: &str) -> bool {
+    if path == template {
+        return true;
+    }
+    let path_segs: Vec<&str> = path.trim_matches('/').split('/').collect();
+    let tmpl_segs: Vec<&str> = template.trim_matches('/').split('/').collect();
+    if path_segs.len() != tmpl_segs.len() {
+        return false;
+    }
+    path_segs
+        .iter()
+        .zip(tmpl_segs.iter())
+        .all(|(p, t)| {
+            if t.starts_with('{') && t.ends_with('}') {
+                !p.is_empty()
+            } else {
+                p == t
+            }
+        })
+}

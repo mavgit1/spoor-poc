@@ -1,0 +1,18 @@
+# Local plans (not in repo)
+PLAN*.md
+
+# Secrets & local config
+.env
+openrouter.json
+
+# Reference clones & scratch
+tmp/
+
+# Cursor rules & local IDE
+.cursor/
+
+# Rust build output
+spoor/target/
+
+# macOS
+.DS_Store
