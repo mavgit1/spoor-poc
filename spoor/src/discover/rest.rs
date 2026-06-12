@@ -5,7 +5,7 @@ use regex::Regex;
 use crate::classify::api_origins;
 use crate::classify::{ClassifiedEntry, Protocol};
 use crate::discover::{confidence_str, protocol_str};
-use crate::rest::path_matching;
+use crate::path;
 use crate::types::Candidate;
 
 pub fn discover(classified: &[ClassifiedEntry]) -> Vec<Candidate> {
@@ -26,10 +26,19 @@ pub fn discover(classified: &[ClassifiedEntry]) -> Vec<Candidate> {
 
     let mut candidates = Vec::new();
     for (origin, paths) in paths_by_origin {
-        let paths_vec: Vec<String> = paths.into_iter().collect();
-        let suggested = path_matching::suggest_param_templates(&paths_vec, custom_regex.as_ref());
+        let paths_vec: Vec<String> = paths
+            .into_iter()
+            .filter(|p| !is_unclusterable_path(p, custom_regex.as_ref()))
+            .collect();
+        if paths_vec.is_empty() {
+            continue;
+        }
+        let suggested = path::suggest_param_templates(&paths_vec, custom_regex.as_ref());
 
         for template in suggested {
+            if !is_actionable_template(&template) {
+                continue;
+            }
             let methods: BTreeSet<String> = classified
                 .iter()
                 .filter(|c| c.protocol == Protocol::Rest && c.entry.origin == origin)
@@ -87,6 +96,32 @@ pub fn discover(classified: &[ClassifiedEntry]) -> Vec<Candidate> {
     }
 
     candidates
+}
+
+/// Lone dynamic segments (e.g. a UUID at `/`) produce useless `/{id}` templates.
+fn is_unclusterable_path(path: &str, custom_regex: Option<&Regex>) -> bool {
+    let segs: Vec<&str> = path
+        .trim_matches('/')
+        .split('/')
+        .filter(|s| !s.is_empty())
+        .collect();
+    segs.len() == 1 && path::is_param_segment(segs[0], custom_regex)
+}
+
+fn is_actionable_template(template: &str) -> bool {
+    let segs: Vec<&str> = template
+        .trim_matches('/')
+        .split('/')
+        .filter(|s| !s.is_empty())
+        .collect();
+    if segs.is_empty() {
+        return false;
+    }
+    if segs.len() == 1 {
+        let s = segs[0];
+        return !(s.starts_with('{') && s.ends_with('}'));
+    }
+    true
 }
 
 fn path_matches_template(path: &str, template: &str) -> bool {

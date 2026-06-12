@@ -31,7 +31,7 @@ async fn classify_batch_inner(
     }
 
     let model = std::env::var("OPENROUTER_MODEL")
-        .unwrap_or_else(|_| "deepseek/deepseek-v4-pro".to_string());
+        .unwrap_or_else(|_| "qwen/qwen3.6-flash".to_string());
 
     let snippets: Vec<serde_json::Value> = entries
         .iter()

@@ -1,6 +1,6 @@
 use std::collections::{HashMap, HashSet};
 
-use crate::classify::path_rules;
+use crate::classify::filters;
 use crate::classify::{ClassifiedEntry, Protocol};
 use crate::ir::TrafficEntry;
 
@@ -9,7 +9,7 @@ pub fn from_classified(classified: &[ClassifiedEntry]) -> HashSet<String> {
     let mut scores: HashMap<String, u32> = HashMap::new();
 
     for item in classified {
-        if path_rules::is_static_asset_path(&item.entry.path) {
+        if filters::is_non_api_path(&item.entry.path) {
             continue;
         }
         let origin = &item.entry.origin;

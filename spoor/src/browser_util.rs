@@ -92,6 +92,30 @@ async fn cleanup_stale_profile_lock(profile: &Path) {
     }
 }
 
+fn panel_cdp_port_file() -> PathBuf {
+    cache_dir().join("panel-cdp-port")
+}
+
+async fn read_saved_panel_port() -> Option<u16> {
+    let content = tokio::fs::read_to_string(panel_cdp_port_file()).await.ok()?;
+    content.trim().parse().ok()
+}
+
+async fn save_panel_port(port: u16) {
+    let _ = tokio::fs::write(panel_cdp_port_file(), port.to_string()).await;
+}
+
+async fn clear_panel_port_file() {
+    let _ = tokio::fs::remove_file(panel_cdp_port_file()).await;
+}
+
+async fn try_connect_panel_cdp(port: u16) -> Result<(Browser, Handler)> {
+    wait_for_cdp_port(port).await?;
+    Browser::connect(format!("http://127.0.0.1:{port}"))
+        .await
+        .context("connect to existing panel Chromium over CDP")
+}
+
 fn panel_chrome_args(app_url: &str, profile: &Path, port: u16) -> Vec<String> {
     vec![
         format!("--user-data-dir={}", profile.display()),
@@ -137,6 +161,16 @@ async fn launch_panel_macos(executable: &Path, app_url: &str) -> Result<(Browser
     let profile = panel_profile_dir();
     cleanup_stale_profile_lock(&profile).await;
 
+    if profile_in_use(&profile) {
+        if let Some(port) = read_saved_panel_port().await {
+            log::info(&format!("reusing panel Chromium on CDP port {port}"));
+            match try_connect_panel_cdp(port).await {
+                Ok(pair) => return Ok(pair),
+                Err(e) => log::warn(&format!("panel reconnect failed ({e:#}), launching fresh")),
+            }
+        }
+    }
+
     let bundle = chromium_app_bundle(executable)?;
     let port = pick_free_port();
     log::info(&format!(
@@ -150,7 +184,6 @@ async fn launch_panel_macos(executable: &Path, app_url: &str) -> Result<(Browser
     }
 
     std::process::Command::new("open")
-        .arg("-n")
         .arg(&bundle)
         .arg("--args")
         .args(&args)
@@ -158,6 +191,7 @@ async fn launch_panel_macos(executable: &Path, app_url: &str) -> Result<(Browser
         .context("open Chromium.app")?;
 
     wait_for_cdp_port(port).await?;
+    save_panel_port(port).await;
     let (browser, handler) = Browser::connect(format!("http://127.0.0.1:{port}"))
         .await
         .context("connect to panel Chromium over CDP")?;
@@ -296,9 +330,11 @@ pub async fn run_panel_browser(
             if let Err(e) = browser.close().await {
                 log::warn(&format!("panel browser close error: {e:#}"));
             }
+            clear_panel_port_file().await;
             let _ = handler_task.await;
         }
         _ = &mut handler_task => {
+            clear_panel_port_file().await;
             log::warn(&format!(
                 "panel browser window closed unexpectedly — server still at {app_url}"
             ));

@@ -20,16 +20,24 @@ const DEFAULT_PATH_IGNORES: &[&str] = &[
     "**/*.svg",
     "**/xjs/**",
     "**/favicon.ico",
+    // Locale / i18n bundles — JSON but not API contracts
+    "**/translations/**",
+    "**/i18n/**",
+    "**/locales/**",
 ];
 
 const DEFAULT_GET_IGNORES: &[&str] = &["**/*.css", "**/*.js", "**/*.map"];
 
-pub struct IgnoreRegistry {
+pub struct FilterRegistry {
     path_matcher: GlobSet,
     get_matcher: GlobSet,
+    allow_matcher: GlobSet,
 }
 
-impl IgnoreRegistry {
+/// Back-compat alias.
+pub type IgnoreRegistry = FilterRegistry;
+
+impl FilterRegistry {
     pub fn load() -> Self {
         let mut path_patterns: Vec<String> = DEFAULT_PATH_IGNORES
             .iter()
@@ -39,6 +47,7 @@ impl IgnoreRegistry {
             .iter()
             .map(|s| (*s).to_string())
             .collect();
+        let mut allow_patterns: Vec<String> = Vec::new();
 
         if let Some(user) = user_ignore_file().filter(|p| p.exists()) {
             if let Ok(content) = std::fs::read_to_string(user) {
@@ -47,7 +56,11 @@ impl IgnoreRegistry {
                     if line.is_empty() || line.starts_with('#') {
                         continue;
                     }
-                    path_patterns.push(line.to_string());
+                    if let Some(pat) = line.strip_prefix("allow:") {
+                        allow_patterns.push(pat.trim().to_string());
+                    } else {
+                        path_patterns.push(line.to_string());
+                    }
                 }
             }
         }
@@ -55,6 +68,7 @@ impl IgnoreRegistry {
         Self {
             path_matcher: compile_globs(&path_patterns),
             get_matcher: compile_globs(&get_patterns),
+            allow_matcher: compile_globs(&allow_patterns),
         }
     }
 
@@ -96,9 +110,47 @@ fn compile_globs(patterns: &[String]) -> GlobSet {
     })
 }
 
-pub fn should_ignore(entry: &TrafficEntry, registry: &IgnoreRegistry) -> bool {
+/// Non-API content paths (i18n bundles, static assets) — shared by filters and REST heuristics.
+pub fn is_non_api_path(path: &str) -> bool {
+    is_static_asset_path(path) || is_locale_content_path(path)
+}
+
+fn is_locale_content_path(path: &str) -> bool {
+    let p = path.to_lowercase();
+    p.contains("/translations")
+        || p.contains("/i18n/")
+        || p.contains("/locales/")
+}
+
+/// Path suffix / prefix rules for static assets.
+pub fn is_static_asset_path(path: &str) -> bool {
+    let p = path.to_lowercase();
+    p.starts_with("/_next/static/")
+        || p.ends_with(".css")
+        || p.ends_with(".js")
+        || p.ends_with(".map")
+        || p.ends_with(".woff2")
+        || p.ends_with(".woff")
+        || p.ends_with(".svg")
+        || p.ends_with(".png")
+        || p.ends_with(".ico")
+        || p.contains("/icons/")
+        || p.contains("/fonts/")
+        || p.contains("/logos/")
+        || p.contains("/scripttemplates/")
+}
+
+pub fn should_ignore(entry: &TrafficEntry, registry: &FilterRegistry) -> bool {
+    if registry.allow_matcher.is_match(&entry.path) {
+        return false;
+    }
+
     let method = entry.flow.method.to_uppercase();
     if SKIP_METHODS.contains(&method.as_str()) {
+        return true;
+    }
+
+    if is_non_api_path(&entry.path) {
         return true;
     }
 

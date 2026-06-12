@@ -6,7 +6,8 @@ mod export;
 mod ir;
 mod log;
 mod pipeline;
-mod rest;
+mod path;
+mod redact;
 mod types;
 mod ui;
 

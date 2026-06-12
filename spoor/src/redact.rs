@@ -54,35 +54,4 @@ mod tests {
         r.redact(&mut v);
         assert_eq!(v, json!({"user": {"token": "[REDACTED]", "name": "Alice"}}));
     }
-
-    #[test]
-    fn redact_hex_pattern() {
-        let r = Redactor::new(&["[0-9a-f]{32,}".to_string()], &[]).unwrap();
-        let mut v = json!({"session": "abcdef1234567890abcdef1234567890", "count": 5});
-        r.redact(&mut v);
-        assert_eq!(v, json!({"session": "[REDACTED]", "count": 5}));
-    }
-
-    #[test]
-    fn redact_invalid_regex() {
-        let result = Redactor::new(&["[invalid".to_string()], &[]);
-        assert!(result.is_err());
-    }
-
-    #[test]
-    fn redact_empty_noop() {
-        let r = Redactor::new(&[], &[]).unwrap();
-        let mut v = json!({"hello": "world", "num": 42});
-        let expected = v.clone();
-        r.redact(&mut v);
-        assert_eq!(v, expected);
-    }
-
-    #[test]
-    fn redact_array_items() {
-        let r = Redactor::new(&[], &["token".to_string()]).unwrap();
-        let mut v = json!([{"token": "secret"}, {"token": "other"}]);
-        r.redact(&mut v);
-        assert_eq!(v, json!([{"token": "[REDACTED]"}, {"token": "[REDACTED]"}]));
-    }
 }

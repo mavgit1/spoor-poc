@@ -1,10 +1,10 @@
-use crate::classify::path_rules;
+use crate::classify::filters;
 use crate::ir::TrafficEntry;
 
 const API_RESOURCE_TYPES: &[&str] = &["Fetch", "XHR", "Document"];
 
 pub fn looks_like_rest(entry: &TrafficEntry) -> bool {
-    if path_rules::is_static_asset_path(&entry.path) {
+    if filters::is_non_api_path(&entry.path) {
         return false;
     }
     let rt = entry.flow.resource_type.as_deref().unwrap_or("");

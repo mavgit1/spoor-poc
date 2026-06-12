@@ -14,22 +14,15 @@ dotenvy = "0.15.7"
 futures = "0.3.32"
 globset = "0.4"
 graphql-parser = "0.4"
-har = "0.9"
-indexmap = { version = "2", features = ["serde"] }
-openapiv3 = "2.2"
 regex = "1.12.4"
-rmp-serde = "1"
-tempfile = "3"
 reqwest = { version = "0.13", features = ["json"] }
 rust-embed = { version = "8", features = ["axum-ex"] }
 serde = { version = "1.0.228", features = ["derive"] }
 serde_json = "1.0.150"
 serde_yaml_ng = "0.10"
-thiserror = "2"
 tokio = { version = "1.52.3", features = ["full"] }
 tower-http = { version = "0.6.11", features = ["fs", "cors"] }
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 url = "2.5.8"
-uuid = { version = "1", features = ["v4"] }
 zip = "2"

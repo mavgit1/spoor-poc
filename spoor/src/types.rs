@@ -46,6 +46,10 @@ pub struct GenerateSelection {
     pub pattern: Option<String>,
 }
 
+fn default_redact() -> bool {
+    true
+}
+
 #[derive(Debug, Clone, Deserialize)]
 pub struct GenerateRequest {
     #[serde(default)]
@@ -53,6 +57,14 @@ pub struct GenerateRequest {
     pub selected: Vec<GenerateSelection>,
     #[serde(default)]
     pub ignore_patterns: Vec<String>,
+    /// Redact session tokens / JWTs in brief examples (default true).
+    #[serde(default = "default_redact")]
+    pub redact: bool,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct IgnoreRequest {
+    pub pattern: String,
 }
 
 #[derive(Debug, Clone, Default)]

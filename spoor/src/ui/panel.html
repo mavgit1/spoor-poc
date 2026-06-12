@@ -92,12 +92,13 @@
     }
     #curation { display: none; }
     .error { color: #ff7675; font-size: 0.75rem; margin-top: 8px; min-height: 1.2em; }
+    .warn { color: #fdcb6e; font-size: 0.75rem; margin-top: 8px; min-height: 1.2em; }
   </style>
 </head>
 <body>
   <div class="card">
     <h1>Spoor</h1>
-    <p class="hint">Record, stop, then select whole APIs to export. Expand an API to tweak individual operations.</p>
+    <p class="hint">Record, stop, select APIs, Generate. Zip includes integration brief + graphql-ops per API.</p>
     <div class="status-row">
       <div class="dot" id="status-dot"></div>
       <span id="status-text">Stopped</span>
@@ -332,6 +333,8 @@
       allCandidates = data.candidates || [];
       apiGroups = buildApiGroups(allCandidates);
       curation.style.display = apiGroups.length ? 'block' : 'none';
+      // Fresh discover: select all ops by default (user narrows down, not up).
+      for (const g of apiGroups) setGroupOps(g, true);
       candidatesLoaded = true;
       renderApiGroups();
     }
@@ -362,14 +365,21 @@
     }
 
     function updateUI(data) {
-      errorEl.textContent = '';
       const apiCount = apiGroups.length;
       const gOps = data.graphql_ops ?? 0;
       const rOps = data.rest_endpoints ?? 0;
+      const classified = data.flows_classified ?? 0;
+      const filtered = data.flows_filtered ?? 0;
       let line = `${data.flow_count} captured`;
+      if (!data.recording && !data.analyzing && classified > 0) {
+        line += ` · ${classified} classified`;
+        if (filtered > 0) line += ` · ${filtered} filtered`;
+      }
       if (!data.recording && !data.analyzing && data.candidate_count > 0) {
-        line += ` · ${apiCount || '?'} API(s) · ${gOps} GraphQL / ${rOps} REST`;
-        if (rOps === 0 && (data.traffic_rest ?? 0) === 0) {
+        line += candidatesLoaded
+          ? ` · ${apiGroups.length} API(s) · ${data.candidate_count} ops (${gOps} GraphQL / ${rOps} REST)`
+          : ` · ${data.candidate_count} ops discovered`;
+        if (rOps === 0 && (data.traffic_rest ?? 0) === 0 && candidatesLoaded) {
           line += ' — no REST traffic matched';
         }
       } else if (data.candidate_count > 0) {
@@ -413,7 +423,30 @@
         errorEl.textContent = 'Select at least one API or operation';
         return;
       }
-      if (await post('/api/generate', { selected, ignore_patterns: [] })) await poll();
+      errorEl.textContent = '';
+      try {
+        const res = await fetch('/api/generate', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ selected, redact: true }),
+        });
+        if (!res.ok) {
+          errorEl.textContent = await res.text() || res.statusText;
+          return;
+        }
+        const data = await res.json();
+        if (data.warnings?.length) {
+          errorEl.className = 'warn';
+          errorEl.textContent = data.warnings.join(' · ');
+        } else {
+          errorEl.className = 'error';
+          errorEl.textContent = '';
+        }
+        await poll();
+      } catch (e) {
+        errorEl.style.color = '#ff7675';
+        errorEl.textContent = 'Generate failed';
+      }
     });
 
     selectAllBtn.addEventListener('click', () => {
@@ -426,6 +459,8 @@
     });
 
     startBtn.addEventListener('click', async () => {
+      errorEl.className = 'error';
+      errorEl.textContent = '';
       opState.clear();
       expandedApis.clear();
       candidatesLoaded = false;

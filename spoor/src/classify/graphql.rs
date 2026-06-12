@@ -7,6 +7,9 @@ pub fn try_parse_operation(entry: &TrafficEntry) -> Option<String> {
     if !matches!(entry.flow.method.to_uppercase().as_str(), "POST" | "GET") {
         return None;
     }
+    if let Some(name) = try_parse_aem_execute_path(&entry.path) {
+        return Some(name);
+    }
     let body = entry.flow.request_body.as_ref()?;
     let json: serde_json::Value = serde_json::from_str(body).ok()?;
     let query = json.get("query").and_then(|q| q.as_str())?;
@@ -49,6 +52,20 @@ fn operation_name<'a>(op: &OperationDefinition<'a, &'a str>) -> Option<String> {
         OperationDefinition::Query(q) => q.name.map(|n| n.to_string()),
         OperationDefinition::Mutation(m) => m.name.map(|n| n.to_string()),
         OperationDefinition::Subscription(s) => s.name.map(|n| n.to_string()),
+    }
+}
+
+/// AEM-style: `/graphql/execute.json/.../onboarding_teaser%3Blocale%3Dde`
+fn try_parse_aem_execute_path(path: &str) -> Option<String> {
+    let marker = "/graphql/execute.json/";
+    let rest = path.split_once(marker).map(|(_, r)| r)?;
+    let segment = rest.rsplit('/').next()?;
+    let decoded = segment.replace("%3B", ";").replace("%3b", ";");
+    let op = decoded.split(';').next()?.trim();
+    if op.is_empty() {
+        None
+    } else {
+        Some(op.to_string())
     }
 }
 

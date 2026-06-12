@@ -20,7 +20,7 @@ use crate::export;
 use crate::ir;
 use crate::log;
 use crate::pipeline;
-use crate::types::{AppState, BrowserSession, Candidate, GenerateRequest};
+use crate::types::{AppState, BrowserSession, Candidate, GenerateRequest, IgnoreRequest};
 
 #[derive(RustEmbed)]
 #[folder = "src/ui/"]
@@ -34,6 +34,7 @@ pub fn router(state: AppState) -> Router {
         .route("/api/status", get(status_handler))
         .route("/api/candidates", get(candidates_handler))
         .route("/api/generate", post(generate_handler))
+        .route("/api/ignore", post(ignore_handler))
         .route("/api/download", get(download_handler))
         .layer(CorsLayer::permissive())
         .with_state(state)
@@ -61,6 +62,8 @@ struct StatusResponse {
     rest_endpoints: usize,
     traffic_graphql: usize,
     traffic_rest: usize,
+    flows_classified: usize,
+    flows_filtered: usize,
 }
 
 async fn status_handler(State(state): State<AppState>) -> Json<StatusResponse> {
@@ -84,6 +87,8 @@ async fn status_handler(State(state): State<AppState>) -> Json<StatusResponse> {
         .iter()
         .filter(|c| c.protocol == Protocol::Rest)
         .count();
+    let flows_classified = classified.len();
+    let flows_filtered = flow_count.saturating_sub(flows_classified);
     let spec_ready = state.export_bundle.read().await.is_some();
     Json(StatusResponse {
         recording: state.is_recording(),
@@ -95,6 +100,8 @@ async fn status_handler(State(state): State<AppState>) -> Json<StatusResponse> {
         rest_endpoints,
         traffic_graphql,
         traffic_rest,
+        flows_classified,
+        flows_filtered,
     })
 }
 
@@ -115,6 +122,12 @@ async fn candidates_handler(State(state): State<AppState>) -> Json<CandidatesRes
     })
 }
 
+#[derive(Serialize)]
+struct GenerateResponse {
+    message: String,
+    warnings: Vec<String>,
+}
+
 async fn generate_handler(
     State(state): State<AppState>,
     Json(req): Json<GenerateRequest>,
@@ -127,12 +140,29 @@ async fn generate_handler(
     let candidates = state.candidates.read().await.clone();
 
     match export::generate_bundle(&classified, &candidates, &req) {
-        Ok(bundle) => {
-            *state.export_bundle.write().await = Some(bundle);
-            (StatusCode::OK, "Spec generated").into_response()
+        Ok(result) => {
+            *state.export_bundle.write().await = Some(result.bundle);
+            Json(GenerateResponse {
+                message: "Export generated".to_string(),
+                warnings: result.warnings,
+            })
+            .into_response()
         }
         Err(e) => {
             log::error(&format!("generate failed: {e:#}"));
+            (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()).into_response()
+        }
+    }
+}
+
+async fn ignore_handler(Json(req): Json<IgnoreRequest>) -> impl IntoResponse {
+    if req.pattern.trim().is_empty() {
+        return (StatusCode::BAD_REQUEST, "Empty ignore pattern").into_response();
+    }
+    match crate::classify::filters::persist_ignore(req.pattern.trim()) {
+        Ok(()) => (StatusCode::OK, "Ignore pattern saved").into_response(),
+        Err(e) => {
+            log::error(&format!("ignore persist failed: {e:#}"));
             (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()).into_response()
         }
     }
@@ -229,7 +259,7 @@ async fn start_handler(State(state): State<AppState>) -> impl IntoResponse {
         capture_task,
     });
 
-    log::info("recording started — use the recording browser window");
+    log::info("recording started — panel window + recording browser (close recording with Stop, not ✕)");
     (StatusCode::OK, "Recording started").into_response()
 }
 
