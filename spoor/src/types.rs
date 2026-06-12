@@ -88,6 +88,7 @@ pub struct AppState {
     pub classified: Arc<RwLock<Vec<ClassifiedEntry>>>,
     pub candidates: Arc<RwLock<Vec<Candidate>>>,
     pub export_bundle: Arc<RwLock<Option<ExportBundle>>>,
+    pub flows_capped: Arc<AtomicBool>,
 }
 
 impl AppState {
@@ -101,6 +102,7 @@ impl AppState {
             classified: Arc::new(RwLock::new(Vec::new())),
             candidates: Arc::new(RwLock::new(Vec::new())),
             export_bundle: Arc::new(RwLock::new(None)),
+            flows_capped: Arc::new(AtomicBool::new(false)),
         }
     }
 

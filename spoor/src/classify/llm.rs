@@ -30,6 +30,13 @@ async fn classify_batch_inner(
         return Ok(vec![]);
     }
 
+    if entries.len() > 20 {
+        log::warn(&format!(
+            "LLM classify: {} ambiguous entries, only first 20 sent to model",
+            entries.len()
+        ));
+    }
+
     let model = std::env::var("OPENROUTER_MODEL")
         .unwrap_or_else(|_| "qwen/qwen3.6-flash".to_string());
 

@@ -13,11 +13,7 @@ use crate::log;
 
 /// All Spoor-owned browser state lives here — never touches system Chrome profiles.
 pub fn cache_dir() -> PathBuf {
-    if let Ok(home) = std::env::var("HOME") {
-        PathBuf::from(home).join(".cache").join("spoor")
-    } else {
-        PathBuf::from(".cache/spoor")
-    }
+    crate::cache_dir::spoor_cache_dir()
 }
 
 /// Keep bundled Chromium fully separate from the user's normal browsers.

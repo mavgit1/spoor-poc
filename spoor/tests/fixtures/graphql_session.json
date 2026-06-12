@@ -1,0 +1,17 @@
+[
+  {
+    "id": "gql-1",
+    "url": "https://api.example.test/graphql",
+    "method": "POST",
+    "request_headers": {
+      "content-type": "application/json"
+    },
+    "request_body": "{\"operationName\":\"StationBoard\",\"query\":\"query StationBoard($processId: ID!) { stationBoard(processId: $processId) { id } }\",\"variables\":{\"processId\":\"proc-abc\"}}",
+    "status": 200,
+    "response_headers": {
+      "content-type": "application/json"
+    },
+    "response_body": "{\"data\":{\"stationBoard\":[]}}",
+    "resource_type": "Fetch"
+  }
+]

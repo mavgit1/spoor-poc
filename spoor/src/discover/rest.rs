@@ -153,12 +153,13 @@ mod tests {
     use crate::ir::TrafficEntry;
     use crate::types::CapturedFlow;
 
-    fn job_room_entry(path: &str, method: &str, body: &str) -> ClassifiedEntry {
+    fn microservice_entry(path: &str, method: &str, body: &str) -> ClassifiedEntry {
+        const ORIGIN: &str = "https://portal.example.test";
         ClassifiedEntry {
             entry: TrafficEntry {
                 flow: CapturedFlow {
                     id: "1".into(),
-                    url: format!("https://www.job-room.ch{path}"),
+                    url: format!("{ORIGIN}{path}"),
                     method: method.into(),
                     request_headers: HashMap::new(),
                     request_body: None,
@@ -170,7 +171,7 @@ mod tests {
                     response_body: Some(body.into()),
                     resource_type: Some("None".into()),
                 },
-                origin: "https://www.job-room.ch".into(),
+                origin: ORIGIN.into(),
                 path: path.into(),
             },
             protocol: Protocol::Rest,
@@ -180,20 +181,20 @@ mod tests {
     }
 
     #[test]
-    fn discovers_job_room_microservice_paths() {
+    fn discovers_microservice_paths() {
         let uuid = "4fb18b9c-90a5-4972-9b4f-23a1e68b440b";
         let classified = vec![
-            job_room_entry(
+            microservice_entry(
                 "/jobadservice/api/jobAdvertisements/_search",
                 "POST",
                 r#"{"total":0}"#,
             ),
-            job_room_entry(
+            microservice_entry(
                 &format!("/jobadservice/api/jobAdvertisements/{uuid}"),
                 "GET",
                 r#"{"id":"x"}"#,
             ),
-            job_room_entry(
+            microservice_entry(
                 "/referenceservice/api/_search/occupations/label",
                 "GET",
                 r#"[]"#,
@@ -202,7 +203,7 @@ mod tests {
         let candidates = super::discover(&classified);
         assert!(
             !candidates.is_empty(),
-            "expected job-room REST candidates, got none"
+            "expected microservice REST candidates, got none"
         );
         assert!(candidates.iter().any(|c| c.guessed_pattern.contains("_search")));
     }

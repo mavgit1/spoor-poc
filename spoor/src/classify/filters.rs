@@ -1,8 +1,9 @@
 use std::path::PathBuf;
 
-use anyhow::Context;
 use globset::{Glob, GlobSet, GlobSetBuilder};
+use url::Url;
 
+use crate::cache_dir;
 use crate::ir::TrafficEntry;
 
 const SKIP_METHODS: &[&str] = &["HEAD", "OPTIONS"];
@@ -20,7 +21,6 @@ const DEFAULT_PATH_IGNORES: &[&str] = &[
     "**/*.svg",
     "**/xjs/**",
     "**/favicon.ico",
-    // Locale / i18n bundles — JSON but not API contracts
     "**/translations/**",
     "**/i18n/**",
     "**/locales/**",
@@ -32,6 +32,7 @@ pub struct FilterRegistry {
     path_matcher: GlobSet,
     get_matcher: GlobSet,
     allow_matcher: GlobSet,
+    host_matcher: GlobSet,
 }
 
 /// Back-compat alias.
@@ -48,19 +49,22 @@ impl FilterRegistry {
             .map(|s| (*s).to_string())
             .collect();
         let mut allow_patterns: Vec<String> = Vec::new();
+        let mut host_patterns: Vec<String> = Vec::new();
 
-        if let Some(user) = user_ignore_file().filter(|p| p.exists()) {
-            if let Ok(content) = std::fs::read_to_string(user) {
-                for line in content.lines() {
-                    let line = line.trim();
-                    if line.is_empty() || line.starts_with('#') {
-                        continue;
-                    }
-                    if let Some(pat) = line.strip_prefix("allow:") {
-                        allow_patterns.push(pat.trim().to_string());
-                    } else {
-                        path_patterns.push(line.to_string());
-                    }
+        if let Some(content) = read_user_config() {
+            for line in content.lines() {
+                let line = line.trim();
+                if line.is_empty() || line.starts_with('#') {
+                    continue;
+                }
+                if let Some(pat) = line.strip_prefix("allow:") {
+                    allow_patterns.push(pat.trim().to_string());
+                } else if let Some(pat) = line.strip_prefix("host:") {
+                    host_patterns.push(pat.trim().to_string());
+                } else if let Some(pat) = line.strip_prefix("ignore:") {
+                    path_patterns.push(pat.trim().to_string());
+                } else {
+                    path_patterns.push(line.to_string());
                 }
             }
         }
@@ -69,31 +73,56 @@ impl FilterRegistry {
             path_matcher: compile_globs(&path_patterns),
             get_matcher: compile_globs(&get_patterns),
             allow_matcher: compile_globs(&allow_patterns),
+            host_matcher: compile_globs(&host_patterns),
         }
     }
 
-    pub fn append_ignore(&self, pattern: &str) -> anyhow::Result<()> {
-        let path = user_ignore_file().context("HOME not set")?;
+    pub fn append_ignore(&self, pattern: &str) -> anyhow::Result<PathBuf> {
+        let path = filters_config_path();
         if let Some(parent) = path.parent() {
             std::fs::create_dir_all(parent)?;
         }
         let mut content = if path.exists() {
             std::fs::read_to_string(&path)?
         } else {
-            String::from("# x-spoor-ignore patterns (one glob per line)\n")
+            String::from(
+                "# Spoor filters — path globs, host:example.com, allow:**/api/**\n",
+            )
         };
         if !content.ends_with('\n') {
             content.push('\n');
         }
-        content.push_str(pattern);
+        let line = if pattern.starts_with("host:") || pattern.starts_with("allow:") {
+            pattern.to_string()
+        } else {
+            format!("ignore:{pattern}")
+        };
+        content.push_str(&line);
         content.push('\n');
-        std::fs::write(&path, content)?;
-        Ok(())
+        std::fs::write(&path, &content)?;
+        Ok(path)
     }
 }
 
-fn user_ignore_file() -> Option<PathBuf> {
-    std::env::var_os("HOME").map(|h| PathBuf::from(h).join(".cache/spoor/ignore-rules.yaml"))
+pub fn filters_config_path() -> PathBuf {
+    cache_dir::filters_config_path()
+}
+
+fn read_user_config() -> Option<String> {
+    let filters = filters_config_path();
+    if filters.exists() {
+        return std::fs::read_to_string(filters).ok();
+    }
+    let legacy = cache_dir::legacy_ignore_config_path();
+    if legacy.exists() {
+        let content = std::fs::read_to_string(&legacy).ok()?;
+        if let Some(parent) = filters.parent() {
+            let _ = std::fs::create_dir_all(parent);
+        }
+        let _ = std::fs::write(&filters, &content);
+        return Some(content);
+    }
+    None
 }
 
 fn compile_globs(patterns: &[String]) -> GlobSet {
@@ -150,6 +179,14 @@ pub fn should_ignore(entry: &TrafficEntry, registry: &FilterRegistry) -> bool {
         return true;
     }
 
+    if let Ok(url) = Url::parse(&entry.flow.url) {
+        if let Some(host) = url.host_str() {
+            if registry.host_matcher.is_match(host) {
+                return true;
+            }
+        }
+    }
+
     if is_non_api_path(&entry.path) {
         return true;
     }
@@ -169,6 +206,54 @@ pub fn should_ignore(entry: &TrafficEntry, registry: &FilterRegistry) -> bool {
     false
 }
 
-pub fn persist_ignore(pattern: &str) -> anyhow::Result<()> {
+pub fn persist_ignore(pattern: &str) -> anyhow::Result<PathBuf> {
     IgnoreRegistry::load().append_ignore(pattern)
+}
+
+#[cfg(test)]
+mod tests {
+    use std::collections::HashMap;
+
+    use crate::types::CapturedFlow;
+
+    use super::*;
+
+    fn entry(path: &str, method: &str, resource_type: Option<&str>) -> TrafficEntry {
+        TrafficEntry {
+            flow: CapturedFlow {
+                id: "1".into(),
+                url: format!("https://example.com{path}"),
+                method: method.into(),
+                request_headers: HashMap::new(),
+                request_body: None,
+                status: Some(200),
+                response_headers: None,
+                response_body: None,
+                resource_type: resource_type.map(str::to_string),
+            },
+            origin: "https://example.com".into(),
+            path: path.into(),
+        }
+    }
+
+    #[test]
+    fn default_globs_block_static_assets() {
+        let reg = FilterRegistry::load();
+        assert!(should_ignore(
+            &entry("/app/chunk-abc.js", "GET", Some("Script")),
+            &reg
+        ));
+        assert!(should_ignore(
+            &entry("/assets/i18n/de.json", "GET", Some("Fetch")),
+            &reg
+        ));
+        assert!(should_ignore(
+            &entry("/tiles/zoom.pbf", "GET", Some("Fetch")),
+            &reg
+        ));
+        assert!(!should_ignore(
+            &entry("/api/v1/search", "GET", Some("Fetch")),
+            &reg
+        ));
+    }
 }

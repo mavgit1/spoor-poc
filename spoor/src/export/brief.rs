@@ -1,12 +1,13 @@
-use std::collections::{BTreeMap, HashSet};
+use std::collections::{BTreeMap, BTreeSet, HashSet};
 
 use serde::Serialize;
 use serde_json::Value;
 
 use crate::classify::{ClassifiedEntry, Protocol};
 use crate::export::auth::{self, AuthObservation};
-use crate::export::query_params::{self, QueryParamObservation};
+use crate::export::example_pick;
 use crate::export::facets::{self, FilterParamCatalog};
+use crate::export::query_params::{self, QueryParamObservation};
 use crate::export::trim;
 use crate::redact::Redactor;
 use crate::types::Candidate;
@@ -90,6 +91,13 @@ pub fn generate_brief_yaml(
     };
 
     let has_filter_values = !filter_values.is_empty();
+    let notes = build_notes(
+        protocol,
+        has_filter_values,
+        &common_query_params,
+        classified,
+        origin,
+    );
 
     let brief = IntegrationBrief {
         spoor_version: 1,
@@ -103,7 +111,7 @@ pub fn generate_brief_yaml(
         common_query_params,
         filter_values,
         operations,
-        notes: default_notes(protocol, has_filter_values),
+        notes,
         filters_applied: default_filters_applied(),
     };
 
@@ -165,7 +173,7 @@ fn graphql_operations(
     selected: &HashSet<String>,
     redact: bool,
 ) -> anyhow::Result<Vec<BriefOperation>> {
-    let mut by_op: BTreeMap<String, ClassifiedEntry> = BTreeMap::new();
+    let mut by_op: BTreeMap<String, Vec<&ClassifiedEntry>> = BTreeMap::new();
     for item in classified
         .iter()
         .filter(|c| c.protocol == Protocol::Graphql && c.entry.origin == origin)
@@ -177,11 +185,15 @@ fn graphql_operations(
         if !selected.is_empty() && !selected.contains(&name) {
             continue;
         }
-        by_op.entry(name).or_insert_with(|| item.clone());
+        by_op.entry(name).or_default().push(item);
     }
 
     Ok(by_op
         .into_iter()
+        .filter_map(|(name, entries)| {
+            let item = example_pick::richest_entry(entries.into_iter())?;
+            Some((name, item))
+        })
         .map(|(name, item)| {
             let mut req = parse_json_body(item.entry.flow.request_body.as_ref());
             let mut resp = parse_json_body(item.entry.flow.response_body.as_ref());
@@ -215,11 +227,11 @@ fn rest_operations(
         let cand = candidates
             .iter()
             .find(|c| c.origin == origin && c.guessed_pattern == *pattern);
-        let example_entry = classified.iter().find(|c| {
+        let example_entry = example_pick::richest_entry(classified.iter().filter(|c| {
             c.protocol == Protocol::Rest
                 && c.entry.origin == origin
                 && path_matches_pattern(&c.entry.path, pattern)
-        });
+        }));
 
         let (method, url, mut req, mut resp) = if let Some(item) = example_entry {
             (
@@ -353,7 +365,31 @@ fn compact_aggregations_summary(value: &Value) -> Value {
     Value::Object(out)
 }
 
-fn default_notes(protocol: &str, has_filter_values: bool) -> Vec<String> {
+fn build_notes(
+    protocol: &str,
+    has_filter_values: bool,
+    query_params: &[QueryParamObservation],
+    classified: &[ClassifiedEntry],
+    origin: &str,
+) -> Vec<String> {
+    let mut notes = base_notes(protocol, has_filter_values);
+    if let Some(page) = query_params.iter().find(|p| p.name == "page") {
+        if page.examples.len() > 1 || page.distinct_count.is_some() {
+            notes.push(
+                "Pagination: increment the page query param with the same request body until a page returns fewer items than size (see common_query_params)."
+                    .to_string(),
+            );
+        }
+    }
+    if protocol == "graphql" {
+        if let Some(dep) = graphql_depends_on_note(classified, origin) {
+            notes.push(dep);
+        }
+    }
+    notes
+}
+
+fn base_notes(protocol: &str, has_filter_values: bool) -> Vec<String> {
     if protocol == "graphql" {
         vec![
             "Feed this brief to an LLM to generate scripts that call these operations.".to_string(),
@@ -376,6 +412,37 @@ fn default_notes(protocol: &str, has_filter_values: bool) -> Vec<String> {
             );
         }
         notes
+    }
+}
+
+fn graphql_depends_on_note(classified: &[ClassifiedEntry], origin: &str) -> Option<String> {
+    let mut vars = BTreeSet::new();
+    for item in classified
+        .iter()
+        .filter(|c| c.protocol == Protocol::Graphql && c.entry.origin == origin)
+    {
+        let Some(body) = item.entry.flow.request_body.as_ref() else {
+            continue;
+        };
+        let Ok(json) = serde_json::from_str::<Value>(body) else {
+            continue;
+        };
+        let Some(obj) = json.get("variables").and_then(|v| v.as_object()) else {
+            continue;
+        };
+        for key in obj.keys() {
+            if key.ends_with("Id") || key == "processId" {
+                vars.insert(key.clone());
+            }
+        }
+    }
+    if vars.is_empty() {
+        None
+    } else {
+        Some(format!(
+            "Session state variables seen in captures (may require a prior step): {}.",
+            vars.into_iter().collect::<Vec<_>>().join(", ")
+        ))
     }
 }
 

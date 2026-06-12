@@ -1,5 +1,6 @@
 pub mod auth;
 pub mod brief;
+pub mod example_pick;
 pub mod facets;
 pub mod graphql;
 pub mod query_params;
@@ -76,18 +77,7 @@ pub fn generate_bundle(
         ));
     }
 
-    let multi_file = rest_by_origin.len() + gql_by_origin.len() > 1;
-
     for (origin, ops) in &gql_by_origin {
-        let yaml = graphql::generate_operations_yaml(classified, origin, ops)?;
-        zip_files.push((
-            if multi_file {
-                format!("graphql-ops-{}.yaml", host_slug(origin))
-            } else {
-                "graphql-ops.yaml".to_string()
-            },
-            yaml,
-        ));
         let brief =
             brief::generate_brief_yaml(classified, origin, "graphql", ops, candidates, redact)?;
         zip_files.push((

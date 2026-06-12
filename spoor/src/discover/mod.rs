@@ -22,8 +22,7 @@ fn compare_candidates(a: &Candidate, b: &Candidate) -> std::cmp::Ordering {
 
 fn confidence_rank(confidence: &str) -> u8 {
     match confidence {
-        "parser" => 3,
-        "inferred" => 2,
+        "parser" => 2,
         "llm" => 1,
         _ => 0,
     }
@@ -32,7 +31,6 @@ fn confidence_rank(confidence: &str) -> u8 {
 pub fn confidence_str(c: Confidence) -> &'static str {
     match c {
         Confidence::Parser => "parser",
-        Confidence::Inferred => "inferred",
         Confidence::Llm => "llm",
     }
 }
@@ -41,7 +39,6 @@ pub fn protocol_str(p: Protocol) -> &'static str {
     match p {
         Protocol::Rest => "rest",
         Protocol::Graphql => "graphql",
-        Protocol::Unknown => "unknown",
         Protocol::Noise => "noise",
     }
 }

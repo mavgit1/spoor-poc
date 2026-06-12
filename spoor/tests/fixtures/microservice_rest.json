@@ -1,0 +1,45 @@
+[
+  {
+    "id": "rest-1",
+    "url": "https://portal.example.test/jobadservice/api/jobAdvertisements/_search?page=1&size=20",
+    "method": "POST",
+    "request_headers": {
+      "content-type": "application/json"
+    },
+    "request_body": "{\"query\":\"developer\",\"language\":\"de\"}",
+    "status": 200,
+    "response_headers": {
+      "content-type": "application/json"
+    },
+    "response_body": "{\"total\":1,\"items\":[{\"id\":\"job-1\"}]}",
+    "resource_type": "Fetch"
+  },
+  {
+    "id": "rest-2",
+    "url": "https://portal.example.test/jobadservice/api/jobAdvertisements/_search?page=2&size=20",
+    "method": "POST",
+    "request_headers": {
+      "content-type": "application/json"
+    },
+    "request_body": "{\"query\":\"developer\",\"language\":\"de\"}",
+    "status": 200,
+    "response_headers": {
+      "content-type": "application/json"
+    },
+    "response_body": "{\"total\":1,\"items\":[]}",
+    "resource_type": "Fetch"
+  },
+  {
+    "id": "rest-3",
+    "url": "https://portal.example.test/referenceservice/api/_search/occupations/label?q=dev",
+    "method": "GET",
+    "request_headers": {},
+    "request_body": null,
+    "status": 200,
+    "response_headers": {
+      "content-type": "application/json"
+    },
+    "response_body": "[{\"id\":\"occ-1\",\"label\":\"Developer\"}]",
+    "resource_type": "Fetch"
+  }
+]

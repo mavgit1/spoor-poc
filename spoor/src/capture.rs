@@ -1,5 +1,6 @@
 use std::collections::HashMap;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 
 use anyhow::Result;
 use base64::Engine;
@@ -14,6 +15,15 @@ use tokio::sync::RwLock;
 
 use crate::log;
 use crate::types::CapturedFlow;
+
+const DEFAULT_MAX_FLOWS: usize = 10_000;
+
+pub fn max_flows_limit() -> usize {
+    std::env::var("SPOOR_MAX_FLOWS")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(DEFAULT_MAX_FLOWS)
+}
 
 fn headers_to_map(headers: &Headers) -> HashMap<String, String> {
     headers
@@ -51,7 +61,43 @@ fn request_body_from_entries(
     }
 }
 
-pub async fn capture(page: Arc<Page>, flows: Arc<RwLock<Vec<CapturedFlow>>>) -> Result<()> {
+fn should_store_response_body(flow: &CapturedFlow) -> bool {
+    if let Some(rt) = flow.resource_type.as_deref() {
+        let lower = rt.to_ascii_lowercase();
+        if lower.contains("image")
+            || lower.contains("font")
+            || lower.contains("media")
+            || lower.contains("stylesheet")
+            || lower.contains("script")
+        {
+            return false;
+        }
+    }
+    if let Some(headers) = &flow.response_headers {
+        let ct = headers
+            .iter()
+            .find(|(k, _)| k.eq_ignore_ascii_case("content-type"))
+            .map(|(_, v)| v.to_ascii_lowercase());
+        if let Some(ct) = ct {
+            if ct.starts_with("image/")
+                || ct.starts_with("font/")
+                || ct.starts_with("video/")
+                || ct.starts_with("audio/")
+                || ct == "application/octet-stream"
+            {
+                return false;
+            }
+        }
+    }
+    true
+}
+
+pub async fn capture(
+    page: Arc<Page>,
+    flows: Arc<RwLock<Vec<CapturedFlow>>>,
+    flows_capped: Arc<AtomicBool>,
+) -> Result<()> {
+    let max_flows = max_flows_limit();
     let mut pending: HashMap<String, CapturedFlow> = HashMap::new();
 
     let mut will_be_sent = page.event_listener::<EventRequestWillBeSent>().await?;
@@ -103,7 +149,6 @@ pub async fn capture(page: Arc<Page>, flows: Arc<RwLock<Vec<CapturedFlow>>>) -> 
                             flow.status = Some(resp.status as u16);
                             flow.response_headers = Some(headers_to_map(&resp.headers));
                             let rt = format!("{:?}", ev.r#type);
-                            // CDP sometimes reports Other; keep Fetch/XHR from requestWillBeSent.
                             if rt != "Other" {
                                 flow.resource_type = Some(rt);
                             }
@@ -120,17 +165,25 @@ pub async fn capture(page: Arc<Page>, flows: Arc<RwLock<Vec<CapturedFlow>>>) -> 
                     Some(ev) => {
                         let id = ev.request_id.inner().clone();
                         if let Some(mut flow) = pending.remove(&id) {
-                            if let Ok(body) = page
-                                .execute(GetResponseBodyParams::new(ev.request_id.clone()))
-                                .await
-                            {
-                                flow.response_body = Some(decode_body(&body.body, body.base64_encoded));
+                            if should_store_response_body(&flow) {
+                                if let Ok(body) = page
+                                    .execute(GetResponseBodyParams::new(ev.request_id.clone()))
+                                    .await
+                                {
+                                    flow.response_body =
+                                        Some(decode_body(&body.body, body.base64_encoded));
+                                }
                             }
                             log::debug(&format!(
                                 "capture: {} {} → {:?}",
                                 flow.method, flow.url, flow.status
                             ));
-                            flows.write().await.push(flow);
+                            let mut guard = flows.write().await;
+                            if guard.len() >= max_flows {
+                                flows_capped.store(true, Ordering::SeqCst);
+                            } else {
+                                guard.push(flow);
+                            }
                         }
                     }
                 }

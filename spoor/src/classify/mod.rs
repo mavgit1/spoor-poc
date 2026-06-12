@@ -1,6 +1,5 @@
 pub mod api_origins;
 pub mod filters;
-pub mod path_rules;
 pub mod graphql;
 pub mod llm;
 pub mod rest;
@@ -12,7 +11,6 @@ use crate::ir::TrafficEntry;
 pub enum Protocol {
     Rest,
     Graphql,
-    Unknown,
     Noise,
 }
 
@@ -20,7 +18,6 @@ pub enum Protocol {
 #[serde(rename_all = "lowercase")]
 pub enum Confidence {
     Parser,
-    Inferred,
     Llm,
 }
 

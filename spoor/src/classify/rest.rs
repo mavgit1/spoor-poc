@@ -68,7 +68,7 @@ fn has_api_resource_type(entry: &TrafficEntry) -> bool {
         .any(|t| lower.contains(&t.to_ascii_lowercase()))
 }
 
-/// Microservice-style paths on the page origin (job-room.ch, etc.).
+/// Microservice-style paths on the page origin (`*-service/api/...`, etc.).
 fn path_looks_like_api(path: &str) -> bool {
     path.contains("/api/")
         || path.contains("-service/")

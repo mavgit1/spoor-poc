@@ -64,6 +64,8 @@ struct StatusResponse {
     traffic_rest: usize,
     flows_classified: usize,
     flows_filtered: usize,
+    flows_capped: bool,
+    filters_config: String,
 }
 
 async fn status_handler(State(state): State<AppState>) -> Json<StatusResponse> {
@@ -102,6 +104,10 @@ async fn status_handler(State(state): State<AppState>) -> Json<StatusResponse> {
         traffic_rest,
         flows_classified,
         flows_filtered,
+        flows_capped: state.flows_capped.load(std::sync::atomic::Ordering::SeqCst),
+        filters_config: crate::classify::filters::filters_config_path()
+            .to_string_lossy()
+            .into_owned(),
     })
 }
 
@@ -155,12 +161,22 @@ async fn generate_handler(
     }
 }
 
+#[derive(Serialize)]
+struct IgnoreResponse {
+    message: String,
+    config_path: String,
+}
+
 async fn ignore_handler(Json(req): Json<IgnoreRequest>) -> impl IntoResponse {
     if req.pattern.trim().is_empty() {
         return (StatusCode::BAD_REQUEST, "Empty ignore pattern").into_response();
     }
     match crate::classify::filters::persist_ignore(req.pattern.trim()) {
-        Ok(()) => (StatusCode::OK, "Ignore pattern saved").into_response(),
+        Ok(path) => Json(IgnoreResponse {
+            message: "Ignore pattern saved".to_string(),
+            config_path: path.to_string_lossy().into_owned(),
+        })
+        .into_response(),
         Err(e) => {
             log::error(&format!("ignore persist failed: {e:#}"));
             (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()).into_response()
@@ -199,6 +215,9 @@ async fn start_handler(State(state): State<AppState>) -> impl IntoResponse {
     *state.candidates.write().await = Vec::new();
     *state.classified.write().await = Vec::new();
     state.flows.write().await.clear();
+    state
+        .flows_capped
+        .store(false, std::sync::atomic::Ordering::SeqCst);
     log::debug("cleared previous session state");
 
     let config = match browser_util::recording_config(state.chromium_executable.as_path()) {
@@ -245,9 +264,10 @@ async fn start_handler(State(state): State<AppState>) -> impl IntoResponse {
     let page = Arc::new(page);
     let flows = Arc::clone(&state.flows);
     let capture_page = Arc::clone(&page);
+    let flows_capped = Arc::clone(&state.flows_capped);
     let capture_task = tokio::spawn(async move {
         log::debug("capture task started");
-        match capture::capture(capture_page, flows).await {
+        match capture::capture(capture_page, flows, flows_capped).await {
             Ok(()) => log::info("capture task ended (event listeners closed)"),
             Err(e) => log::error(&format!("capture task failed: {e:#}")),
         }

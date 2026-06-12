@@ -126,19 +126,19 @@ mod tests {
     fn collects_distinct_examples() {
         let classified = vec![
             entry_with_url(
-                "https://www.job-room.ch/jobadservice/api/jobAdvertisements/_search?page=0&size=20",
+                "https://portal.example.test/jobadservice/api/jobAdvertisements/_search?page=0&size=20",
             ),
             entry_with_url(
-                "https://www.job-room.ch/jobadservice/api/jobAdvertisements/_search?page=1&size=20",
+                "https://portal.example.test/jobadservice/api/jobAdvertisements/_search?page=1&size=20",
             ),
             entry_with_url(
-                "https://www.job-room.ch/jobadservice/api/jobAdvertisements/_search?page=2&size=20",
+                "https://portal.example.test/jobadservice/api/jobAdvertisements/_search?page=2&size=20",
             ),
             entry_with_url(
-                "https://www.job-room.ch/jobadservice/api/jobAdvertisements/_search?page=0&size=20",
+                "https://portal.example.test/jobadservice/api/jobAdvertisements/_search?page=0&size=20",
             ),
         ];
-        let params = observe_for_origin(&classified, "https://www.job-room.ch");
+        let params = observe_for_origin(&classified, "https://portal.example.test");
         let page = params.iter().find(|p| p.name == "page").expect("page param");
         assert_eq!(page.examples, vec!["0", "1", "2"]);
         assert_eq!(page.seen_on_requests, 4);
@@ -152,9 +152,9 @@ mod tests {
     #[test]
     fn includes_framework_params_when_present() {
         let classified = vec![entry_with_url(
-            "https://www.job-room.ch/api/foo?_ng=ZGU=&page=0",
+            "https://portal.example.test/api/foo?_ng=ZGU=&page=0",
         )];
-        let params = observe_for_origin(&classified, "https://www.job-room.ch");
+        let params = observe_for_origin(&classified, "https://portal.example.test");
         let ng = params.iter().find(|p| p.name == "_ng").expect("_ng param");
         assert_eq!(ng.examples, vec!["ZGU="]);
         assert!(params.iter().any(|p| p.name == "page"));

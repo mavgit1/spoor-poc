@@ -269,11 +269,11 @@ mod tests {
     fn extracts_facets_map() {
         let body = r#"{"facets":{"companySegments":{"kmu":10,"gu":5},"regionIds":{"7":100,"11":50}}}"#;
         let entries = vec![rest_entry(
-            "https://job-search-api.jobs.ch",
+            "https://search-api.example.test",
             "/aggregations",
             body,
         )];
-        let catalog = extract_filter_catalog(&entries, "https://job-search-api.jobs.ch");
+        let catalog = extract_filter_catalog(&entries, "https://search-api.example.test");
         assert!(catalog.iter().any(|c| c.param == "companySegments"));
         let segs = catalog.iter().find(|c| c.param == "companySegments").unwrap();
         assert!(segs.values.iter().any(|v| v.value == "kmu" && v.hits == Some(10)));
@@ -283,11 +283,11 @@ mod tests {
     fn extracts_aggregation_buckets() {
         let body = r#"{"aggregations":{"place":{"buckets":[{"key":"Zürich","docCount":42}]}}}"#;
         let entries = vec![rest_entry(
-            "https://job-search-api.jobs.ch",
+            "https://search-api.example.test",
             "/aggregations",
             body,
         )];
-        let catalog = extract_filter_catalog(&entries, "https://job-search-api.jobs.ch");
+        let catalog = extract_filter_catalog(&entries, "https://search-api.example.test");
         let place = catalog.iter().find(|c| c.param == "place").unwrap();
         assert_eq!(place.values[0].value, "Zürich");
         assert_eq!(place.values[0].hits, Some(42));

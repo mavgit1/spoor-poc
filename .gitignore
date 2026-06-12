@@ -1,5 +1,5 @@
-# Local plans (not in repo)
-PLAN*.md
+# Local plan (not in repo)
+PLAN.md
 
 # Secrets & local config
 .env
@@ -7,6 +7,9 @@ openrouter.json
 
 # Reference clones & scratch
 tmp/
+
+# Local one-off scripts
+scripts/
 
 # Cursor rules & local IDE
 .cursor/
