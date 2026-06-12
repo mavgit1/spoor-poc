@@ -384,6 +384,8 @@
         }
       } else if (data.candidate_count > 0) {
         line += ` · ${data.candidate_count} ops`;
+      } else if (!data.recording && !data.analyzing && classified > 0) {
+        line += ' · 0 ops discovered — browse more API actions or check verbose logs';
       }
       flowCount.textContent = line;
       dot.className = 'dot';

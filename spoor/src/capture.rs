@@ -102,7 +102,11 @@ pub async fn capture(page: Arc<Page>, flows: Arc<RwLock<Vec<CapturedFlow>>>) -> 
                             let resp = &ev.response;
                             flow.status = Some(resp.status as u16);
                             flow.response_headers = Some(headers_to_map(&resp.headers));
-                            flow.resource_type = Some(format!("{:?}", ev.r#type));
+                            let rt = format!("{:?}", ev.r#type);
+                            // CDP sometimes reports Other; keep Fetch/XHR from requestWillBeSent.
+                            if rt != "Other" {
+                                flow.resource_type = Some(rt);
+                            }
                         }
                     }
                 }

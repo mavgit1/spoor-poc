@@ -4,7 +4,8 @@ use serde::Serialize;
 use serde_json::Value;
 
 use crate::classify::{ClassifiedEntry, Protocol};
-use crate::export::auth::{self, AuthObservation, QueryParamObservation};
+use crate::export::auth::{self, AuthObservation};
+use crate::export::query_params::{self, QueryParamObservation};
 use crate::export::facets::{self, FilterParamCatalog};
 use crate::export::trim;
 use crate::redact::Redactor;
@@ -75,7 +76,7 @@ pub fn generate_brief_yaml(
 ) -> anyhow::Result<String> {
     let selected: HashSet<String> = selected_patterns.iter().cloned().collect();
     let auth = auth::observe_for_origin(classified, origin);
-    let common_query_params = auth::observe_query_params(classified, origin);
+    let common_query_params = query_params::observe_for_origin(classified, origin);
     let filter_values = if protocol == "rest" {
         facets::extract_filter_catalog(classified, origin)
     } else {

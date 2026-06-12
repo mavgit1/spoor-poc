@@ -144,3 +144,66 @@ fn path_matches_template(path: &str, template: &str) -> bool {
             }
         })
 }
+
+#[cfg(test)]
+mod tests {
+    use std::collections::HashMap;
+
+    use crate::classify::{ClassifiedEntry, Confidence, Protocol};
+    use crate::ir::TrafficEntry;
+    use crate::types::CapturedFlow;
+
+    fn job_room_entry(path: &str, method: &str, body: &str) -> ClassifiedEntry {
+        ClassifiedEntry {
+            entry: TrafficEntry {
+                flow: CapturedFlow {
+                    id: "1".into(),
+                    url: format!("https://www.job-room.ch{path}"),
+                    method: method.into(),
+                    request_headers: HashMap::new(),
+                    request_body: None,
+                    status: Some(200),
+                    response_headers: Some(HashMap::from([(
+                        "content-type".into(),
+                        "application/json".into(),
+                    )])),
+                    response_body: Some(body.into()),
+                    resource_type: Some("None".into()),
+                },
+                origin: "https://www.job-room.ch".into(),
+                path: path.into(),
+            },
+            protocol: Protocol::Rest,
+            confidence: Confidence::Llm,
+            operation_name: None,
+        }
+    }
+
+    #[test]
+    fn discovers_job_room_microservice_paths() {
+        let uuid = "4fb18b9c-90a5-4972-9b4f-23a1e68b440b";
+        let classified = vec![
+            job_room_entry(
+                "/jobadservice/api/jobAdvertisements/_search",
+                "POST",
+                r#"{"total":0}"#,
+            ),
+            job_room_entry(
+                &format!("/jobadservice/api/jobAdvertisements/{uuid}"),
+                "GET",
+                r#"{"id":"x"}"#,
+            ),
+            job_room_entry(
+                "/referenceservice/api/_search/occupations/label",
+                "GET",
+                r#"[]"#,
+            ),
+        ];
+        let candidates = super::discover(&classified);
+        assert!(
+            !candidates.is_empty(),
+            "expected job-room REST candidates, got none"
+        );
+        assert!(candidates.iter().any(|c| c.guessed_pattern.contains("_search")));
+    }
+}

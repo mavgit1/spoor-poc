@@ -27,15 +27,6 @@ pub struct AuthObservation {
     pub note: Option<String>,
 }
 
-/// API query parameters (deduped by name) — not authentication.
-#[derive(Debug, Clone, Serialize)]
-pub struct QueryParamObservation {
-    pub name: String,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub example: Option<String>,
-    pub seen_on_requests: usize,
-}
-
 pub fn observe_for_origin(classified: &[ClassifiedEntry], origin: &str) -> Vec<AuthObservation> {
     let entries: Vec<_> = classified
         .iter()
@@ -138,38 +129,6 @@ pub fn observe_for_origin(classified: &[ClassifiedEntry], origin: &str) -> Vec<A
     out
 }
 
-pub fn observe_query_params(
-    classified: &[ClassifiedEntry],
-    origin: &str,
-) -> Vec<QueryParamObservation> {
-    let mut by_name: BTreeMap<String, (String, usize)> = BTreeMap::new();
-
-    for item in classified.iter().filter(|c| c.entry.origin == origin) {
-        let Ok(url) = Url::parse(&item.entry.flow.url) else {
-            continue;
-        };
-        for (k, v) in url.query_pairs() {
-            let name = k.to_string();
-            if is_auth_query_param(&name) {
-                continue;
-            }
-            by_name
-                .entry(name)
-                .and_modify(|(_, n)| *n += 1)
-                .or_insert((v.to_string(), 1));
-        }
-    }
-
-    by_name
-        .into_iter()
-        .map(|(name, (example, count))| QueryParamObservation {
-            name,
-            example: Some(example),
-            seen_on_requests: count,
-        })
-        .collect()
-}
-
 pub fn session_auth_warnings(classified: &[ClassifiedEntry], origins: &HashSet<String>) -> Vec<String> {
     let mut warnings = Vec::new();
     for origin in origins {
@@ -188,7 +147,7 @@ pub fn session_auth_warnings(classified: &[ClassifiedEntry], origins: &HashSet<S
     warnings
 }
 
-fn is_auth_query_param(name: &str) -> bool {
+pub(crate) fn is_auth_query_param(name: &str) -> bool {
     let n = name.to_ascii_lowercase();
     n == "api_key"
         || n == "apikey"

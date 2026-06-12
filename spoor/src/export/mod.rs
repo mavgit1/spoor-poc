@@ -2,6 +2,7 @@ pub mod auth;
 pub mod brief;
 pub mod facets;
 pub mod graphql;
+pub mod query_params;
 pub mod trim;
 
 use std::collections::{BTreeMap, HashSet};

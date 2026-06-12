@@ -7,8 +7,7 @@ pub fn looks_like_rest(entry: &TrafficEntry) -> bool {
     if filters::is_non_api_path(&entry.path) {
         return false;
     }
-    let rt = entry.flow.resource_type.as_deref().unwrap_or("");
-    if !API_RESOURCE_TYPES.iter().any(|t| rt.contains(t)) {
+    if !has_api_resource_type(entry) && !path_looks_like_api(&entry.path) {
         return false;
     }
     if entry.flow.response_body.is_none() {
@@ -38,7 +37,7 @@ fn request_is_json(entry: &TrafficEntry) -> bool {
 }
 
 fn response_is_json(entry: &TrafficEntry) -> bool {
-    entry
+    if entry
         .flow
         .response_headers
         .as_ref()
@@ -48,4 +47,30 @@ fn response_is_json(entry: &TrafficEntry) -> bool {
                 .map(|(_, v)| v.as_str())
         })
         .is_some_and(|ct| ct.contains("application/json") || ct.contains("+json"))
+    {
+        return true;
+    }
+    entry
+        .flow
+        .response_body
+        .as_ref()
+        .is_some_and(|b| serde_json::from_str::<serde_json::Value>(b).is_ok())
+}
+
+fn has_api_resource_type(entry: &TrafficEntry) -> bool {
+    let rt = entry.flow.resource_type.as_deref().unwrap_or("");
+    if rt.is_empty() || rt == "None" {
+        return false;
+    }
+    let lower = rt.to_ascii_lowercase();
+    API_RESOURCE_TYPES
+        .iter()
+        .any(|t| lower.contains(&t.to_ascii_lowercase()))
+}
+
+/// Microservice-style paths on the page origin (job-room.ch, etc.).
+fn path_looks_like_api(path: &str) -> bool {
+    path.contains("/api/")
+        || path.contains("-service/")
+        || path.ends_with("/api")
 }
