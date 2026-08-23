@@ -193,3 +193,88 @@ async fn captures_redirects_bodies_and_second_target() {
         "sequence must be unique across targets — export infers ordering from it"
     );
 }
+
+/// Known gap: a target that navigates the instant it is created loses its
+/// opening requests, because capture only attaches after `Target.targetCreated`
+/// and then has to resolve the page and enable `Network`.
+///
+/// The sibling test above sidesteps this by pausing before navigating. This one
+/// does not, and it is the shape that matters in practice: an OAuth popup opens
+/// straight onto the provider's authorize URL, so the document request and any
+/// immediate redirect are exactly what we drop.
+///
+/// The real fix is browser-level `Target.setAutoAttach` with
+/// `waitForDebuggerOnStart`, resuming via `Runtime.runIfWaitingForDebugger`
+/// once `Network` is enabled on the new session. chromiumoxide's handler does
+/// not send that resume for browser-level attachments, so it needs to be driven
+/// manually.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "known gap: early requests on a self-navigating new target are missed"]
+async fn captures_first_request_of_a_self_navigating_target() {
+    let addr = spawn_server().await;
+    let base = format!("http://{addr}");
+
+    let chromium = browser_util::ensure_chromium()
+        .await
+        .expect("chromium available");
+    let config = browser_util::recording_config(&chromium).expect("recording config");
+    let (browser, handler) = Browser::launch(config).await.expect("launch browser");
+    let handler_task = browser_util::spawn_handler(handler, "smoke-race");
+
+    let page = Arc::new(
+        browser
+            .new_page("about:blank")
+            .await
+            .expect("open first tab"),
+    );
+    let flows: Arc<RwLock<Vec<CaptureRecord>>> = Arc::new(RwLock::new(Vec::new()));
+    let flows_capped = Arc::new(AtomicBool::new(false));
+    let page_urls: Arc<RwLock<Vec<BrowsingPage>>> = Arc::new(RwLock::new(Vec::new()));
+
+    let session: Arc<Mutex<Option<BrowserSession>>> = Arc::new(Mutex::new(None));
+    *session.lock().await = Some(BrowserSession {
+        browser,
+        handler_task,
+        capture_task: tokio::spawn(async {}),
+    });
+
+    let capture_task = tokio::spawn({
+        let (page, flows, flows_capped, page_urls, session) = (
+            Arc::clone(&page),
+            Arc::clone(&flows),
+            Arc::clone(&flows_capped),
+            Arc::clone(&page_urls),
+            Arc::clone(&session),
+        );
+        async move {
+            let _ = capture::capture(page, flows, flows_capped, page_urls, session).await;
+        }
+    });
+    tokio::time::sleep(Duration::from_millis(500)).await;
+
+    // No pause between creation and navigation — this is what a popup does.
+    {
+        let guard = session.lock().await;
+        let browser = &guard.as_ref().expect("session present").browser;
+        browser
+            .new_page(format!("{base}/popup"))
+            .await
+            .expect("open popup tab");
+    }
+    tokio::time::sleep(Duration::from_millis(2500)).await;
+
+    let mut taken = session.lock().await.take().expect("session present");
+    taken.browser.close().await.ok();
+    let _ = capture_task.await;
+    let _ = taken.handler_task.await;
+
+    let flows = flows.read().await.clone();
+    assert!(
+        find(&flows, "/popup").is_some(),
+        "popup document request must be captured"
+    );
+    assert!(
+        find(&flows, "/api/from-popup").is_some(),
+        "popup's opening API call must be captured"
+    );
+}

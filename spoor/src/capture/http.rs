@@ -148,6 +148,22 @@ fn take_expired(
     out
 }
 
+/// Only network traffic can be API evidence.
+///
+/// Browser-internal schemes (`chrome://`, `devtools://`) and inline payloads
+/// (`data:`, `blob:`) are never a remote API, and a single inlined image can be
+/// hundreds of kilobytes. Dropping them here rather than in `classify::filters`
+/// keeps them out of memory entirely and stops them consuming the flow cap.
+fn is_capturable_url(url: &str) -> bool {
+    let Some((scheme, _)) = url.split_once(':') else {
+        return false;
+    };
+    matches!(
+        scheme.to_ascii_lowercase().as_str(),
+        "http" | "https" | "ws" | "wss"
+    )
+}
+
 fn start_request(
     pending: &mut HashMap<String, PendingRequest>,
     request_id: String,
@@ -252,6 +268,9 @@ pub async fn run(
                         flush_records(&flows, &flows_capped, max_flows, evicted).await;
 
                         let req = &ev.request;
+                        if !is_capturable_url(&req.url) {
+                            continue;
+                        }
                         let cdp_id = ev.request_id.inner().clone();
                         let hop = if let Some(redirect) = ev.redirect_response.as_ref() {
                             if let Some((hop_record, next_hop)) =
@@ -425,6 +444,27 @@ mod tests {
     fn entry(raw: impl Into<String>) -> PostDataEntry {
         PostDataEntry {
             bytes: Some(raw.into().into()),
+        }
+    }
+
+    #[test]
+    fn captures_only_network_schemes() {
+        for url in [
+            "https://api.example.test/v1/things",
+            "http://127.0.0.1:8080/api",
+            "wss://api.example.test/socket",
+        ] {
+            assert!(is_capturable_url(url), "{url} should be captured");
+        }
+        for url in [
+            "chrome://new-tab-page/",
+            "devtools://devtools/bundled/panel.js",
+            "data:image/png;base64,iVBORw0KGgo=",
+            "blob:https://example.test/1234",
+            "about:blank",
+            "not-a-url",
+        ] {
+            assert!(!is_capturable_url(url), "{url} should be skipped");
         }
     }
 
