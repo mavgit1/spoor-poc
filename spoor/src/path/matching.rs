@@ -2,21 +2,46 @@ use std::collections::{HashMap, HashSet};
 
 use regex::Regex;
 
-use super::segments::{is_base58, is_hex_string, is_numeric_string, is_upper_case_slug, is_uuid};
+use super::segments::{
+    is_base58, is_hex_string, is_ipv4_or_dotted_numeric, is_numeric_string, is_upper_case_slug,
+    is_uuid,
+};
 use crate::path::MIN_VARIABILITY_CARDINALITY;
 
-/// Check if a path segment looks like a parameter value (numeric, UUID, etc.).
+/// Check if a path segment looks like a parameter value (numeric, UUID, IP, etc.).
 pub fn is_param_segment(segment: &str, custom_regex: Option<&Regex>) -> bool {
     if segment.is_empty() || is_version_prefix(segment) {
         return false;
     }
-    if is_numeric_string(segment) || is_uuid(segment) {
+    if is_numeric_string(segment) || is_uuid(segment) || is_ipv4_or_dotted_numeric(segment) {
         return true;
     }
     if is_upper_case_slug(segment) || is_hex_string(segment) || is_base58(segment) {
         return true;
     }
     custom_regex.is_some_and(|re| re.is_match(segment))
+}
+
+/// Match a concrete path against a `{id}`-style template.
+/// Template placeholders only match param-like segments — not API vocabulary
+/// (`_search`, `label`, …), so `…/jobAdvertisements/{id}` does not swallow
+/// `…/jobAdvertisements/_search`.
+pub fn path_matches_template(path: &str, template: &str) -> bool {
+    if path == template {
+        return true;
+    }
+    let path_segs: Vec<&str> = path.trim_matches('/').split('/').collect();
+    let tmpl_segs: Vec<&str> = template.trim_matches('/').split('/').collect();
+    if path_segs.len() != tmpl_segs.len() {
+        return false;
+    }
+    path_segs.iter().zip(tmpl_segs.iter()).all(|(p, t)| {
+        if t.starts_with('{') && t.ends_with('}') {
+            !p.is_empty() && !looks_like_api_vocabulary(p)
+        } else {
+            p == t
+        }
+    })
 }
 
 /// Suggest `{id}` path templates from observed URL paths on the same origin.
@@ -132,5 +157,17 @@ mod tests {
             "/api/v1/status/inactive".to_string(),
         ];
         assert_eq!(suggest_param_templates(&paths, None).len(), 2);
+    }
+
+    #[test]
+    fn template_id_does_not_match_api_vocabulary() {
+        assert!(path_matches_template(
+            "/jobadservice/api/jobAdvertisements/4fb18b9c-90a5-4972-9b4f-23a1e68b440b",
+            "/jobadservice/api/jobAdvertisements/{id}"
+        ));
+        assert!(!path_matches_template(
+            "/jobadservice/api/jobAdvertisements/_search",
+            "/jobadservice/api/jobAdvertisements/{id}"
+        ));
     }
 }

@@ -1,16 +1,19 @@
-use graphql_parser::query::{Definition, OperationDefinition};
 use graphql_parser::parse_query;
+use graphql_parser::query::{Definition, OperationDefinition};
 
 use crate::ir::TrafficEntry;
 
 pub fn try_parse_operation(entry: &TrafficEntry) -> Option<String> {
-    if !matches!(entry.flow.method.to_uppercase().as_str(), "POST" | "GET") {
+    if entry.is_websocket() {
+        return None;
+    }
+    if !matches!(entry.http_method().to_uppercase().as_str(), "POST" | "GET") {
         return None;
     }
     if let Some(name) = try_parse_aem_execute_path(&entry.path) {
         return Some(name);
     }
-    let body = entry.flow.request_body.as_ref()?;
+    let body = entry.text_request()?;
     let json: serde_json::Value = serde_json::from_str(body).ok()?;
     let query = json.get("query").and_then(|q| q.as_str())?;
     if query.trim().is_empty() {

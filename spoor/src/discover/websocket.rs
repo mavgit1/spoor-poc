@@ -10,13 +10,13 @@ pub fn discover(classified: &[ClassifiedEntry]) -> Vec<Candidate> {
 
     for item in classified
         .iter()
-        .filter(|c| c.protocol == Protocol::Graphql)
+        .filter(|c| c.protocol == Protocol::WebSocket)
     {
-        let op = item
+        let msg = item
             .operation_name
             .clone()
-            .unwrap_or_else(|| "anonymous".to_string());
-        let key = (item.entry.origin.clone(), op);
+            .unwrap_or_else(|| "frame".to_string());
+        let key = (item.entry.origin.clone(), msg);
         *counts.entry(key.clone()).or_insert(0) += 1;
         examples.entry(key).or_insert_with(|| item.clone());
     }
@@ -25,20 +25,22 @@ pub fn discover(classified: &[ClassifiedEntry]) -> Vec<Candidate> {
         .into_iter()
         .filter_map(|(key, request_count)| {
             let item = examples.get(&key)?;
-            let (origin, op) = key;
+            let (origin, msg) = key;
             let host = origin
                 .trim_start_matches("https://")
                 .trim_start_matches("http://")
+                .trim_start_matches("wss://")
+                .trim_start_matches("ws://")
                 .to_string();
-            let id = format!("graphql|{origin}|{op}");
+            let id = format!("ws|{origin}|{msg}");
             Some(Candidate {
                 id,
-                label: format!("GraphQL {op}"),
-                protocol: protocol_str(Protocol::Graphql).to_string(),
-                guessed_pattern: op.clone(),
+                label: format!("WS · {msg}"),
+                protocol: protocol_str(Protocol::WebSocket).to_string(),
+                guessed_pattern: msg,
                 example: item.entry.flow.url.clone(),
                 host,
-                methods: vec![item.entry.http_method().to_uppercase()],
+                methods: vec!["WS".into()],
                 confidence: confidence_str(item.confidence).to_string(),
                 origin,
                 request_count,

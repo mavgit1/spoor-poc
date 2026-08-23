@@ -14,7 +14,10 @@ use spoor::types::AppState;
 use spoor::ui::router;
 
 #[derive(Parser)]
-#[command(name = "spoor", about = "Capture browser API traffic and export integration briefs")]
+#[command(
+    name = "spoor",
+    about = "Capture browser API traffic and export integration briefs"
+)]
 struct Cli {
     /// Launch the chromeless control panel and server
     #[arg(long)]

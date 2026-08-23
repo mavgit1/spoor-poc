@@ -4,9 +4,7 @@ use std::path::PathBuf;
 pub fn spoor_cache_dir() -> PathBuf {
     dirs::cache_dir()
         .map(|d| d.join("spoor"))
-        .or_else(|| {
-            std::env::var_os("HOME").map(|h| PathBuf::from(h).join(".cache").join("spoor"))
-        })
+        .or_else(|| std::env::var_os("HOME").map(|h| PathBuf::from(h).join(".cache").join("spoor")))
         .unwrap_or_else(|| PathBuf::from(".cache/spoor"))
 }
 

@@ -26,14 +26,17 @@ pub struct FilterValue {
 }
 
 /// Build a query-param value catalog from captured JSON (facets, aggregations, typeahead).
-pub fn extract_filter_catalog(classified: &[ClassifiedEntry], origin: &str) -> Vec<FilterParamCatalog> {
+pub fn extract_filter_catalog(
+    classified: &[ClassifiedEntry],
+    origin: &str,
+) -> Vec<FilterParamCatalog> {
     let mut by_param: BTreeMap<String, (String, BTreeMap<String, FilterValue>)> = BTreeMap::new();
 
     for item in classified
         .iter()
         .filter(|c| c.protocol == Protocol::Rest && c.entry.origin == origin)
     {
-        let Some(body) = item.entry.flow.response_body.as_ref() else {
+        let Some(body) = item.entry.text_response() else {
             continue;
         };
         let Ok(json) = serde_json::from_str::<Value>(body) else {
@@ -41,7 +44,7 @@ pub fn extract_filter_catalog(classified: &[ClassifiedEntry], origin: &str) -> V
         };
         let source = format!(
             "{} {}",
-            item.entry.flow.method.to_uppercase(),
+            item.entry.http_method().to_uppercase(),
             item.entry.path
         );
 
@@ -57,10 +60,7 @@ pub fn extract_filter_catalog(classified: &[ClassifiedEntry], origin: &str) -> V
 
         if let Some(aggs) = json.get("aggregations").and_then(|v| v.as_object()) {
             for (agg_name, agg_body) in aggs {
-                if let Some(buckets) = agg_body
-                    .get("buckets")
-                    .and_then(|v| v.as_array())
-                {
+                if let Some(buckets) = agg_body.get("buckets").and_then(|v| v.as_array()) {
                     merge_buckets(
                         &mut by_param,
                         agg_name,
@@ -132,7 +132,8 @@ fn merge_count_map(
         .or_insert_with(|| (source.to_string(), BTreeMap::new()));
     for (key, count) in map {
         let hits = json_as_u64(count);
-        entry.1
+        entry
+            .1
             .entry(key.clone())
             .and_modify(|v| {
                 if hits > v.hits.unwrap_or(0) {
@@ -238,23 +239,29 @@ fn value_to_string(v: &Value) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::capture::{Body, CaptureRecord, Transport};
     use crate::classify::{Confidence, Protocol};
     use crate::ir::TrafficEntry;
-    use crate::types::CapturedFlow;
 
     fn rest_entry(origin: &str, path: &str, body: &str) -> ClassifiedEntry {
         ClassifiedEntry {
             entry: TrafficEntry {
-                flow: CapturedFlow {
+                flow: CaptureRecord {
                     id: "test".into(),
+                    transport: Transport::Http,
                     url: format!("{origin}{path}"),
-                    method: "GET".into(),
+                    method: Some("GET".into()),
                     request_headers: Default::default(),
                     request_body: None,
                     status: Some(200),
                     response_headers: None,
-                    response_body: Some(body.into()),
+                    response_body: Some(Body::text(body)),
                     resource_type: Some("Fetch".into()),
+                    sequence: 0,
+                    timestamp_ms: None,
+                    ws_request_id: None,
+                    ws_opcode: None,
+                    direction: None,
                 },
                 origin: origin.into(),
                 path: path.into(),
@@ -267,7 +274,8 @@ mod tests {
 
     #[test]
     fn extracts_facets_map() {
-        let body = r#"{"facets":{"companySegments":{"kmu":10,"gu":5},"regionIds":{"7":100,"11":50}}}"#;
+        let body =
+            r#"{"facets":{"companySegments":{"kmu":10,"gu":5},"regionIds":{"7":100,"11":50}}}"#;
         let entries = vec![rest_entry(
             "https://search-api.example.test",
             "/aggregations",
@@ -275,8 +283,15 @@ mod tests {
         )];
         let catalog = extract_filter_catalog(&entries, "https://search-api.example.test");
         assert!(catalog.iter().any(|c| c.param == "companySegments"));
-        let segs = catalog.iter().find(|c| c.param == "companySegments").unwrap();
-        assert!(segs.values.iter().any(|v| v.value == "kmu" && v.hits == Some(10)));
+        let segs = catalog
+            .iter()
+            .find(|c| c.param == "companySegments")
+            .unwrap();
+        assert!(
+            segs.values
+                .iter()
+                .any(|v| v.value == "kmu" && v.hits == Some(10))
+        );
     }
 
     #[test]

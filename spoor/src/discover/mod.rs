@@ -1,5 +1,9 @@
+pub mod form;
 pub mod graphql;
+pub mod grpc;
+pub mod jsonrpc;
 pub mod rest;
+pub mod websocket;
 
 use crate::classify::{ClassifiedEntry, Confidence, Protocol};
 use crate::types::Candidate;
@@ -8,6 +12,10 @@ pub fn discover_candidates(classified: &[ClassifiedEntry]) -> Vec<Candidate> {
     let mut candidates = Vec::new();
     candidates.extend(rest::discover(classified));
     candidates.extend(graphql::discover(classified));
+    candidates.extend(jsonrpc::discover(classified));
+    candidates.extend(form::discover(classified));
+    candidates.extend(websocket::discover(classified));
+    candidates.extend(grpc::discover(classified));
     candidates.sort_by(compare_candidates);
     candidates
 }
@@ -36,9 +44,5 @@ pub fn confidence_str(c: Confidence) -> &'static str {
 }
 
 pub fn protocol_str(p: Protocol) -> &'static str {
-    match p {
-        Protocol::Rest => "rest",
-        Protocol::Graphql => "graphql",
-        Protocol::Noise => "noise",
-    }
+    crate::classify::protocol_str(p)
 }

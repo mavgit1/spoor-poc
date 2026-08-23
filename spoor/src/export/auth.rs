@@ -4,6 +4,7 @@ use serde::Serialize;
 use url::Url;
 
 use crate::classify::ClassifiedEntry;
+use crate::redact::sensitive_query_param;
 
 #[derive(Debug, Clone, Serialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
@@ -35,13 +36,18 @@ pub fn observe_for_origin(classified: &[ClassifiedEntry], origin: &str) -> Vec<A
 
     let mut headers_seen: BTreeMap<String, Vec<String>> = BTreeMap::new();
     let mut public_keys: HashMap<String, (String, usize)> = HashMap::new();
+    let mut unauthorized = 0usize;
 
     for item in &entries {
+        if matches!(item.entry.flow.status, Some(401 | 403)) {
+            unauthorized += 1;
+        }
         if let Ok(url) = Url::parse(&item.entry.flow.url) {
             for (k, v) in url.query_pairs() {
                 let name = k.to_string();
-                if is_auth_query_param(&name) {
-                    let entry = public_keys.entry(name).or_insert((v.to_string(), 0));
+                let val = v.to_string();
+                if sensitive_query_param(&name, &val) {
+                    let entry = public_keys.entry(name).or_insert((val, 0));
                     entry.1 += 1;
                 }
             }
@@ -57,9 +63,17 @@ pub fn observe_for_origin(classified: &[ClassifiedEntry], origin: &str) -> Vec<A
     let mut out = Vec::new();
 
     for (name, (example, count)) in public_keys {
+        let visibility = if example.to_ascii_lowercase().starts_with("client-")
+            || name.eq_ignore_ascii_case("k")
+            || name.to_ascii_lowercase().contains("client")
+        {
+            AuthVisibility::PublicClientKey
+        } else {
+            AuthVisibility::SessionSecret
+        };
         out.push(AuthObservation {
             auth_type: "query_param".to_string(),
-            visibility: AuthVisibility::PublicClientKey,
+            visibility,
             name,
             example: Some(example),
             note: Some(format!("seen on {count} request(s)")),
@@ -70,11 +84,11 @@ pub fn observe_for_origin(classified: &[ClassifiedEntry], origin: &str) -> Vec<A
         match name.as_str() {
             "authorization" => {
                 let example = values.first().cloned();
-                let note = example.as_ref().and_then(|v| {
+                let note = example.as_ref().map(|v| {
                     if v.to_ascii_lowercase().starts_with("bearer ") {
-                        Some("Bearer token — redact in shared exports".to_string())
+                        "Authorization: Bearer … observed".to_string()
                     } else {
-                        Some("Authorization header present".to_string())
+                        "Authorization header observed".to_string()
                     }
                 });
                 out.push(AuthObservation {
@@ -92,7 +106,7 @@ pub fn observe_for_origin(classified: &[ClassifiedEntry], origin: &str) -> Vec<A
                     visibility: AuthVisibility::SessionSecret,
                     name: names.join(", "),
                     example: None,
-                    note: Some("Cookie values redacted in exports by default".to_string()),
+                    note: Some(format!("Cookie header observed ({})", names.join(", "))),
                 });
             }
             "x-csrf-token" | "x-xsrf-token" => out.push(AuthObservation {
@@ -100,7 +114,7 @@ pub fn observe_for_origin(classified: &[ClassifiedEntry], origin: &str) -> Vec<A
                 visibility: AuthVisibility::CsrfToken,
                 name: name.to_string(),
                 example: values.first().cloned(),
-                note: Some("Often required on mutations after page load".to_string()),
+                note: Some("CSRF-style header observed on requests".to_string()),
             }),
             "x-api-key" | "api-key" => {
                 let example = values.first().cloned();
@@ -116,20 +130,35 @@ pub fn observe_for_origin(classified: &[ClassifiedEntry], origin: &str) -> Vec<A
         }
     }
 
+    if unauthorized > 0 {
+        out.push(AuthObservation {
+            auth_type: "status_signal".to_string(),
+            visibility: AuthVisibility::SessionSecret,
+            name: "http_401_or_403".to_string(),
+            example: None,
+            note: Some(format!(
+                "{unauthorized} call(s) returned 401/403 — endpoint likely requires a signed-in session"
+            )),
+        });
+    }
+
     if out.is_empty() {
         out.push(AuthObservation {
             auth_type: "none".to_string(),
             visibility: AuthVisibility::None,
             name: "none".to_string(),
             example: None,
-            note: None,
+            note: Some("No credentials or 401/403 signals observed in this session".into()),
         });
     }
 
     out
 }
 
-pub fn session_auth_warnings(classified: &[ClassifiedEntry], origins: &HashSet<String>) -> Vec<String> {
+pub fn session_auth_warnings(
+    classified: &[ClassifiedEntry],
+    origins: &HashSet<String>,
+) -> Vec<String> {
     let mut warnings = Vec::new();
     for origin in origins {
         let auth = observe_for_origin(classified, origin);
@@ -140,21 +169,11 @@ pub fn session_auth_warnings(classified: &[ClassifiedEntry], origins: &HashSet<S
             )
         }) {
             warnings.push(format!(
-                "Session auth detected for {origin} — secrets redacted when redact=true"
+                "Session auth observed for {origin} (cookie/bearer/401) — examples may be redacted when redact=true"
             ));
         }
     }
     warnings
-}
-
-pub(crate) fn is_auth_query_param(name: &str) -> bool {
-    let n = name.to_ascii_lowercase();
-    n == "api_key"
-        || n == "apikey"
-        || n == "api-key"
-        || n == "access_token"
-        || n == "refresh_token"
-        || n == "token"
 }
 
 fn cookie_names(cookie_header: Option<&String>) -> Vec<String> {

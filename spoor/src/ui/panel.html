@@ -35,15 +35,38 @@
     .btn-danger { background: #d63031; color: #fff; }
     .btn-accent { background: #6c5ce7; color: #fff; }
     .btn-download { background: #0984e3; color: #fff; display: none; }
+    .btn-dump { background: #2d3436; color: #dfe6e9; border: 1px solid #636e72; display: none; }
     .btn-link {
       background: transparent; color: #74b9ff; padding: 4px 0;
       font-weight: 500; font-size: 0.75rem;
     }
-    .btn-ignore {
-      background: transparent; color: #b2bec3; border: 1px solid #2d3436;
-      padding: 3px 8px; font-size: 0.65rem; font-weight: 500; flex-shrink: 0;
+    .op-head {
+      display: flex; align-items: center; gap: 6px; min-width: 0;
     }
+    .op-name {
+      flex: 1; min-width: 0; font-size: 0.8rem; font-weight: 500;
+      line-height: 1.25; word-break: break-word;
+    }
+    .op-count {
+      flex-shrink: 0; font-size: 0.65rem; color: #00b894; white-space: nowrap;
+    }
+    .op-actions {
+      flex-shrink: 0; min-width: 3.5rem; display: flex; justify-content: flex-end;
+      align-items: center;
+    }
+    .op-head .btn-pref {
+      border: 1px solid #2d3436; border-radius: 4px;
+      padding: 3px 5px; font-size: 0.6rem; font-weight: 500;
+      margin: 0; line-height: 1.2; white-space: nowrap;
+    }
+    .btn-pref {
+      background: transparent; cursor: pointer;
+    }
+    .btn-ignore { color: #b2bec3; }
     .btn-ignore:hover { color: #dfe6e9; border-color: #636e72; }
+    .btn-allow { color: #55efc4; border-color: #2d4a3e; }
+    .btn-allow:hover { color: #81ecec; border-color: #00b894; }
+    .op-row.saved-off .op-name { color: #636e72; }
     code { font-size: 0.7rem; color: #b2bec3; }
     .toolbar { display: flex; align-items: center; gap: 10px; margin-bottom: 8px; flex-wrap: wrap; }
     .api-list {
@@ -67,6 +90,10 @@
     }
     .tag.rest { background: #0984e3; }
     .tag.graphql { background: #e17055; }
+    .tag.jsonrpc { background: #a29bfe; }
+    .tag.websocket { background: #00b894; }
+    .tag.form { background: #fdcb6e; color: #2d3436; }
+    .tag.grpcweb, .tag.protobuf { background: #636e72; }
     .expand-btn {
       background: transparent; color: #74b9ff; border: none;
       font-size: 0.7rem; padding: 4px 6px; cursor: pointer; flex-shrink: 0;
@@ -78,6 +105,7 @@
     .ops-list.open {
       display: flex;
       max-height: 200px;
+      overflow-x: hidden;
       overflow-y: auto;
       -webkit-overflow-scrolling: touch;
     }
@@ -86,9 +114,6 @@
       padding: 6px 0; border-bottom: 1px solid #2d3436;
     }
     .op-row:last-child { border-bottom: none; }
-    .op-head { display: flex; align-items: flex-start; gap: 8px; }
-    .op-name { flex: 1; font-size: 0.8rem; font-weight: 500; }
-    .op-count { font-size: 0.65rem; color: #00b894; }
     .pattern-row label {
       display: block; font-size: 0.65rem; color: #b2bec3; margin-bottom: 3px;
     }
@@ -99,12 +124,17 @@
     #curation { display: none; }
     .error { color: #ff7675; font-size: 0.75rem; margin-top: 8px; min-height: 1.2em; }
     .warn { color: #fdcb6e; font-size: 0.75rem; margin-top: 8px; min-height: 1.2em; }
+    .opt-row {
+      display: flex; align-items: center; gap: 8px;
+      margin-top: 10px; font-size: 0.75rem; color: #dfe6e9; cursor: pointer;
+    }
+    .opt-row input { accent-color: #00b894; }
   </style>
 </head>
 <body>
   <div class="card">
     <h1>Spoor</h1>
-    <p class="hint">Record, stop, select APIs, Generate. Zip includes one integration brief per API. Ignore noise via <code>allow:</code> / <code>host:</code> / <code>ignore:</code> in your filters file (path shown in status after save).</p>
+    <p class="hint">Start → browse → Stop → select ops → Generate. <strong>Download capture</strong> exports raw CDP traffic (gzip JSON) for debugging — not the briefs. <strong>Ignore</strong> adds to your filters file (still captured, listed, unchecked next time). <strong>Allow</strong> on grey ops removes that ignore. Static assets (.js, images) are dropped automatically — never listed.</p>
     <div class="status-row">
       <div class="dot" id="status-dot"></div>
       <span id="status-text">Stopped</span>
@@ -113,6 +143,7 @@
     <div class="buttons">
       <button id="start-btn" class="btn-primary">Start</button>
       <button id="stop-btn" class="btn-danger" disabled>Stop</button>
+      <a id="dump-btn" class="download-link btn-dump" href="/api/dump" download="spoor-capture.json.gz">Download capture</a>
     </div>
     <div class="error" id="error"></div>
     <div class="warn" id="warn"></div>
@@ -130,6 +161,10 @@
       <button id="generate-btn" class="btn-accent" disabled>Generate</button>
       <a id="download-btn" class="download-link btn-download" href="/api/download" download="spoor-export.zip">Download zip</a>
     </div>
+    <label class="opt-row" title="When on, replaces known secret field names and JWT-shaped strings in examples. Public job-ad emails etc. are left as-is unless fields match.">
+      <input type="checkbox" id="redact-cb" />
+      <span>Redact secrets in examples</span>
+    </label>
   </div>
 
   <script>
@@ -140,6 +175,7 @@
     const stopBtn = document.getElementById('stop-btn');
     const generateBtn = document.getElementById('generate-btn');
     const downloadBtn = document.getElementById('download-btn');
+    const dumpBtn = document.getElementById('dump-btn');
     const errorEl = document.getElementById('error');
     const warnEl = document.getElementById('warn');
     const curation = document.getElementById('curation');
@@ -234,8 +270,22 @@
       for (const group of apiGroups) {
         const state = groupCheckState(group);
         const expanded = expandedApis.has(group.key);
-        const protocolLabel = group.protocol === 'graphql' ? 'GraphQL' : 'REST';
-        const opLabel = group.protocol === 'graphql' ? 'operations' : 'endpoints';
+        const protocolLabel = group.protocol === 'graphql'
+          ? 'GraphQL'
+          : group.protocol === 'jsonrpc'
+            ? 'JSON-RPC'
+            : group.protocol === 'websocket'
+              ? 'WebSocket'
+              : group.protocol === 'form'
+                ? 'Form'
+                : group.protocol === 'grpcweb'
+                  ? 'gRPC-Web'
+                  : group.protocol === 'protobuf'
+                    ? 'Protobuf'
+                    : 'REST';
+        const opLabel = (group.protocol === 'graphql' || group.protocol === 'jsonrpc' || group.protocol === 'websocket')
+          ? 'operations'
+          : 'endpoints';
 
         const el = document.createElement('div');
         el.className = 'api-group';
@@ -270,17 +320,22 @@
 
         for (const op of group.ops) {
           const saved = opState.get(op.id);
-          const checked = saved ? saved.checked : false;
+          const checked = saved ? saved.checked : (op.default_selected === true);
           const pattern = saved?.pattern || op.guessed_pattern;
           const row = document.createElement('div');
           row.className = 'op-row';
           row.dataset.id = op.id;
+          const savedOff = op.preference_ignored;
+          row.className = 'op-row' + (savedOff && !checked ? ' saved-off' : '');
+          const actionBtn = savedOff
+            ? `<button type="button" class="btn-pref btn-allow" title="Remove from ignore list">Allow</button>`
+            : `<button type="button" class="btn-pref btn-ignore" title="Add to ignore list (unchecked next session)">Ignore</button>`;
           row.innerHTML = `
             <div class="op-head">
               <input type="checkbox" class="op-cb" ${checked ? 'checked' : ''}>
               <span class="op-name">${escapeHtml(op.label)}</span>
               <span class="op-count">${op.request_count ?? 0}×</span>
-              <button type="button" class="btn-ignore" title="Add ignore pattern for future sessions">Ignore</button>
+              <span class="op-actions">${actionBtn}</span>
             </div>
             <div class="pattern-row">
               <label>Pattern</label>
@@ -296,9 +351,10 @@
           row.querySelector('.pattern-input').addEventListener('input', (e) => {
             setOpChecked(op.id, opCb.checked, e.target.value);
           });
-          row.querySelector('.btn-ignore').addEventListener('click', (e) => {
+          const prefBtn = row.querySelector('.btn-pref');
+          prefBtn.addEventListener('click', (e) => {
             e.stopPropagation();
-            ignoreOp(op, group);
+            saveFilterPreference(op, group, savedOff ? 'allow' : 'ignore');
           });
           opsList.appendChild(row);
         }
@@ -346,8 +402,12 @@
       allCandidates = data.candidates || [];
       apiGroups = buildApiGroups(allCandidates);
       curation.style.display = apiGroups.length ? 'block' : 'none';
-      // Fresh discover: select all ops by default (user narrows down, not up).
-      for (const g of apiGroups) setGroupOps(g, true);
+      // Fresh discover: select ops unless saved ignore/host preference says otherwise.
+      for (const g of apiGroups) {
+        for (const op of g.ops) {
+          setOpChecked(op.id, op.default_selected === true, op.guessed_pattern);
+        }
+      }
       candidatesLoaded = true;
       renderApiGroups();
     }
@@ -380,7 +440,11 @@
     function updateUI(data) {
       const apiCount = apiGroups.length;
       const gOps = data.graphql_ops ?? 0;
+      const jOps = data.jsonrpc_ops ?? 0;
       const rOps = data.rest_endpoints ?? 0;
+      const wOps = data.websocket_ops ?? 0;
+      const fOps = data.form_ops ?? 0;
+      const grpcOps = data.grpc_ops ?? 0;
       const classified = data.flows_classified ?? 0;
       const filtered = data.flows_filtered ?? 0;
       let line = `${data.flow_count} captured`;
@@ -389,10 +453,17 @@
         if (filtered > 0) line += ` · ${filtered} filtered`;
       }
       if (!data.recording && !data.analyzing && data.candidate_count > 0) {
+        const parts = [];
+        if (gOps) parts.push(`${gOps} GraphQL`);
+        if (jOps) parts.push(`${jOps} JSON-RPC`);
+        if (rOps) parts.push(`${rOps} REST`);
+        if (wOps) parts.push(`${wOps} WS`);
+        if (fOps) parts.push(`${fOps} form`);
+        if (grpcOps) parts.push(`${grpcOps} gRPC/protobuf`);
         line += candidatesLoaded
-          ? ` · ${apiGroups.length} API(s) · ${data.candidate_count} ops (${gOps} GraphQL / ${rOps} REST)`
+          ? ` · ${apiGroups.length} API(s) · ${data.candidate_count} ops (${parts.join(' / ') || 'mixed'})`
           : ` · ${data.candidate_count} ops discovered`;
-        if (rOps === 0 && (data.traffic_rest ?? 0) === 0 && candidatesLoaded) {
+        if (rOps === 0 && (data.traffic_rest ?? 0) === 0 && candidatesLoaded && !wOps && !grpcOps) {
           line += ' — no REST traffic matched';
         }
       } else if (data.candidate_count > 0) {
@@ -402,6 +473,16 @@
       }
       if (data.flows_capped) {
         line += ' · flow limit reached (older traffic kept)';
+      }
+      const und = data.undecoded_binary ?? 0;
+      const wsFrames = data.websocket_frames ?? 0;
+      const grpcCov = data.grpc_or_protobuf ?? 0;
+      if (!data.recording && !data.analyzing && (und || wsFrames || grpcCov)) {
+        const cov = [];
+        if (und) cov.push(`${und} undecoded binary`);
+        if (wsFrames) cov.push(`${wsFrames} ws frames`);
+        if (grpcCov) cov.push(`${grpcCov} grpc/protobuf`);
+        line += ` · coverage: ${cov.join(', ')}`;
       }
       flowCount.textContent = line;
       if (data.filters_config && !data.recording) {
@@ -414,11 +495,14 @@
       startBtn.disabled = data.recording || data.analyzing;
       stopBtn.disabled = !data.recording;
       downloadBtn.style.display = data.spec_ready ? 'inline-block' : 'none';
+      dumpBtn.style.display = (!data.recording && data.flow_count > 0) ? 'inline-block' : 'none';
       generateBtn.disabled = data.recording || data.analyzing || !candidatesLoaded;
     }
 
-    function ignorePatternForOp(op, group) {
-      if (group.protocol === 'graphql') {
+    function preferencePatternForOp(op, group) {
+      if (group.protocol === 'graphql' || group.protocol === 'jsonrpc'
+          || group.protocol === 'websocket' || group.protocol === 'grpcweb'
+          || group.protocol === 'protobuf') {
         try {
           const host = new URL(group.origin).host;
           return `host:${host}`;
@@ -431,15 +515,15 @@
       return trimmed ? `**/${trimmed}**` : `**/*`;
     }
 
-    async function ignoreOp(op, group) {
-      const pattern = ignorePatternForOp(op, group);
+    async function saveFilterPreference(op, group, action) {
+      const pattern = preferencePatternForOp(op, group);
       errorEl.textContent = '';
       warnEl.textContent = '';
       try {
-        const res = await fetch('/api/ignore', {
+        const res = await fetch('/api/filter', {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ pattern }),
+          body: JSON.stringify({ pattern, action }),
         });
         const text = await res.text();
         if (!res.ok) {
@@ -448,9 +532,20 @@
         }
         let data = {};
         try { data = JSON.parse(text); } catch {}
-        warnEl.textContent = `Ignored ${pattern} → ${data.config_path || 'filters file'}`;
+        const verb = action === 'allow' ? 'Removed from ignore list' : 'Ignored';
+        warnEl.textContent = `${verb}: ${pattern} → ${data.config_path || 'filters file'}`;
+        if (action === 'allow') {
+          op.preference_ignored = false;
+          op.default_selected = true;
+          setOpChecked(op.id, true, opState.get(op.id)?.pattern || op.guessed_pattern);
+        } else {
+          op.preference_ignored = true;
+          op.default_selected = false;
+          setOpChecked(op.id, false, opState.get(op.id)?.pattern || op.guessed_pattern);
+        }
+        renderApiGroups();
       } catch {
-        errorEl.textContent = 'Ignore failed';
+        errorEl.textContent = `${action} failed`;
       }
     }
 
@@ -488,7 +583,10 @@
         const res = await fetch('/api/generate', {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ selected, redact: true }),
+          body: JSON.stringify({
+            selected,
+            redact: document.getElementById('redact-cb').checked,
+          }),
         });
         if (!res.ok) {
           errorEl.textContent = await res.text() || res.statusText;
@@ -526,6 +624,7 @@
       apiGroups = [];
       apiList.innerHTML = '';
       downloadBtn.style.display = 'none';
+      dumpBtn.style.display = 'none';
       if (await post('/api/start')) await poll();
     });
 

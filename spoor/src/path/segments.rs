@@ -52,6 +52,20 @@ pub(super) fn is_uuid(s: &str) -> bool {
         .all(|(part, &len)| part.len() == len && part.chars().all(|c| c.is_ascii_hexdigit()))
 }
 
+/// Full IPv4 or dotted numeric ids like `96.116.242` (common in CMP settings paths).
+pub(super) fn is_ipv4_or_dotted_numeric(s: &str) -> bool {
+    let parts: Vec<&str> = s.split('.').collect();
+    if parts.len() < 3 || parts.len() > 4 {
+        return false;
+    }
+    parts.iter().all(|p| {
+        !p.is_empty()
+            && p.len() <= 3
+            && p.chars().all(|c| c.is_ascii_digit())
+            && p.parse::<u16>().is_ok_and(|n| n <= 255)
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -65,5 +79,12 @@ mod tests {
     #[test]
     fn uuid_valid() {
         assert!(is_uuid("550e8400-e29b-41d4-a716-446655440000"));
+    }
+
+    #[test]
+    fn dotted_numeric_param() {
+        assert!(is_ipv4_or_dotted_numeric("96.116.242.1"));
+        assert!(is_ipv4_or_dotted_numeric("96.116.242"));
+        assert!(!is_ipv4_or_dotted_numeric("v1.2"));
     }
 }

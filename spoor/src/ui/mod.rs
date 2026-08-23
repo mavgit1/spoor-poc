@@ -16,11 +16,13 @@ use tower_http::cors::CorsLayer;
 use crate::browser_util::{self, spawn_handler};
 use crate::capture;
 use crate::classify::Protocol;
+use crate::classify::filters::{self, FilterAction};
+use crate::dump;
 use crate::export;
 use crate::ir;
 use crate::log;
 use crate::pipeline;
-use crate::types::{AppState, BrowserSession, Candidate, GenerateRequest, IgnoreRequest};
+use crate::types::{AppState, BrowserSession, Candidate, FilterPreferenceRequest, GenerateRequest};
 
 #[derive(RustEmbed)]
 #[folder = "src/ui/"]
@@ -34,8 +36,10 @@ pub fn router(state: AppState) -> Router {
         .route("/api/status", get(status_handler))
         .route("/api/candidates", get(candidates_handler))
         .route("/api/generate", post(generate_handler))
-        .route("/api/ignore", post(ignore_handler))
+        .route("/api/ignore", post(filter_preference_handler))
+        .route("/api/filter", post(filter_preference_handler))
         .route("/api/download", get(download_handler))
+        .route("/api/dump", get(dump_handler))
         .layer(CorsLayer::permissive())
         .with_state(state)
 }
@@ -59,12 +63,21 @@ struct StatusResponse {
     spec_ready: bool,
     candidate_count: usize,
     graphql_ops: usize,
+    jsonrpc_ops: usize,
     rest_endpoints: usize,
+    websocket_ops: usize,
+    form_ops: usize,
+    grpc_ops: usize,
     traffic_graphql: usize,
+    traffic_jsonrpc: usize,
     traffic_rest: usize,
+    traffic_websocket: usize,
     flows_classified: usize,
     flows_filtered: usize,
     flows_capped: bool,
+    undecoded_binary: usize,
+    websocket_frames: usize,
+    grpc_or_protobuf: usize,
     filters_config: String,
 }
 
@@ -76,22 +89,41 @@ async fn status_handler(State(state): State<AppState>) -> Json<StatusResponse> {
         .iter()
         .filter(|c| c.protocol == "graphql")
         .count();
-    let rest_endpoints = candidates
+    let jsonrpc_ops = candidates
         .iter()
-        .filter(|c| c.protocol == "rest")
+        .filter(|c| c.protocol == "jsonrpc")
+        .count();
+    let rest_endpoints = candidates.iter().filter(|c| c.protocol == "rest").count();
+    let websocket_ops = candidates
+        .iter()
+        .filter(|c| c.protocol == "websocket")
+        .count();
+    let form_ops = candidates.iter().filter(|c| c.protocol == "form").count();
+    let grpc_ops = candidates
+        .iter()
+        .filter(|c| c.protocol == "grpcweb" || c.protocol == "protobuf")
         .count();
     let classified = state.classified.read().await;
     let traffic_graphql = classified
         .iter()
         .filter(|c| c.protocol == Protocol::Graphql)
         .count();
+    let traffic_jsonrpc = classified
+        .iter()
+        .filter(|c| c.protocol == Protocol::JsonRpc)
+        .count();
     let traffic_rest = classified
         .iter()
         .filter(|c| c.protocol == Protocol::Rest)
         .count();
+    let traffic_websocket = classified
+        .iter()
+        .filter(|c| c.protocol == Protocol::WebSocket)
+        .count();
     let flows_classified = classified.len();
     let flows_filtered = flow_count.saturating_sub(flows_classified);
     let spec_ready = state.export_bundle.read().await.is_some();
+    let coverage = state.coverage.read().await.clone();
     Json(StatusResponse {
         recording: state.is_recording(),
         analyzing: state.is_analyzing(),
@@ -99,12 +131,21 @@ async fn status_handler(State(state): State<AppState>) -> Json<StatusResponse> {
         spec_ready,
         candidate_count,
         graphql_ops,
+        jsonrpc_ops,
         rest_endpoints,
+        websocket_ops,
+        form_ops,
+        grpc_ops,
         traffic_graphql,
+        traffic_jsonrpc,
         traffic_rest,
+        traffic_websocket,
         flows_classified,
         flows_filtered,
         flows_capped: state.flows_capped.load(std::sync::atomic::Ordering::SeqCst),
+        undecoded_binary: coverage.undecoded_binary,
+        websocket_frames: coverage.websocket_frames,
+        grpc_or_protobuf: coverage.grpc_or_protobuf,
         filters_config: crate::classify::filters::filters_config_path()
             .to_string_lossy()
             .into_owned(),
@@ -121,7 +162,19 @@ async fn candidates_handler(State(state): State<AppState>) -> Json<CandidatesRes
     let classified = state.classified.read().await;
     let entries: Vec<_> = classified.iter().map(|c| c.entry.clone()).collect();
     let origins = ir::unique_origins(&entries);
-    let candidates = state.candidates.read().await.clone();
+    let registry = filters::FilterRegistry::load();
+    let candidates: Vec<Candidate> = state
+        .candidates
+        .read()
+        .await
+        .iter()
+        .map(|c| {
+            let mut c = c.clone();
+            c.preference_ignored = filters::preference_ignored(&c, &registry);
+            c.default_selected = filters::default_selected(&c, &registry);
+            c
+        })
+        .collect();
     Json(CandidatesResponse {
         origins,
         candidates,
@@ -144,8 +197,18 @@ async fn generate_handler(
 
     let classified = state.classified.read().await.clone();
     let candidates = state.candidates.read().await.clone();
+    let flows = state.flows.read().await.clone();
+    let coverage = state.coverage.read().await.clone();
+    let page_urls = state.page_urls.read().await.clone();
 
-    match export::generate_bundle(&classified, &candidates, &req) {
+    match export::generate_bundle_with_coverage(
+        &classified,
+        &candidates,
+        &req,
+        &flows,
+        &coverage,
+        &page_urls,
+    ) {
         Ok(result) => {
             *state.export_bundle.write().await = Some(result.bundle);
             Json(GenerateResponse {
@@ -162,23 +225,81 @@ async fn generate_handler(
 }
 
 #[derive(Serialize)]
-struct IgnoreResponse {
+struct FilterPreferenceResponse {
     message: String,
     config_path: String,
+    action: String,
 }
 
-async fn ignore_handler(Json(req): Json<IgnoreRequest>) -> impl IntoResponse {
+async fn filter_preference_handler(Json(req): Json<FilterPreferenceRequest>) -> impl IntoResponse {
     if req.pattern.trim().is_empty() {
-        return (StatusCode::BAD_REQUEST, "Empty ignore pattern").into_response();
+        return (StatusCode::BAD_REQUEST, "Empty pattern").into_response();
     }
-    match crate::classify::filters::persist_ignore(req.pattern.trim()) {
-        Ok(path) => Json(IgnoreResponse {
-            message: "Ignore pattern saved".to_string(),
-            config_path: path.to_string_lossy().into_owned(),
-        })
-        .into_response(),
+    let action = match req.action.trim().to_ascii_lowercase().as_str() {
+        "ignore" => FilterAction::Ignore,
+        "allow" => FilterAction::Allow,
+        _ => {
+            return (StatusCode::BAD_REQUEST, "action must be ignore or allow").into_response();
+        }
+    };
+    match filters::persist_preference(req.pattern.trim(), action) {
+        Ok(path) => {
+            let message = match action {
+                FilterAction::Ignore => "Ignore pattern saved".to_string(),
+                FilterAction::Allow => "Removed from ignore list".to_string(),
+            };
+            Json(FilterPreferenceResponse {
+                message,
+                config_path: path.to_string_lossy().into_owned(),
+                action: req.action,
+            })
+            .into_response()
+        }
         Err(e) => {
-            log::error(&format!("ignore persist failed: {e:#}"));
+            log::error(&format!("filter preference persist failed: {e:#}"));
+            (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()).into_response()
+        }
+    }
+}
+
+async fn dump_handler(State(state): State<AppState>) -> impl IntoResponse {
+    if state.is_recording() {
+        return (
+            StatusCode::CONFLICT,
+            "Stop recording before downloading capture",
+        )
+            .into_response();
+    }
+
+    let flows = state.flows.read().await;
+    if flows.is_empty() {
+        return (StatusCode::NOT_FOUND, "No captured traffic yet").into_response();
+    }
+
+    let classified = state.classified.read().await;
+    let flows_capped = state.flows_capped.load(std::sync::atomic::Ordering::SeqCst);
+
+    match dump::build_capture_dump_gzip(&flows, &classified, flows_capped) {
+        Ok(bytes) => {
+            log::info(&format!(
+                "capture dump: {} flows ({} classified), {} bytes gzip",
+                flows.len(),
+                classified.len(),
+                bytes.len()
+            ));
+            let mut headers = HeaderMap::new();
+            headers.insert(
+                header::CONTENT_TYPE,
+                HeaderValue::from_static("application/gzip"),
+            );
+            headers.insert(
+                header::CONTENT_DISPOSITION,
+                HeaderValue::from_static("attachment; filename=\"spoor-capture.json.gz\""),
+            );
+            (StatusCode::OK, headers, bytes).into_response()
+        }
+        Err(e) => {
+            log::error(&format!("capture dump failed: {e:#}"));
             (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()).into_response()
         }
     }
@@ -215,6 +336,7 @@ async fn start_handler(State(state): State<AppState>) -> impl IntoResponse {
     *state.candidates.write().await = Vec::new();
     *state.classified.write().await = Vec::new();
     state.flows.write().await.clear();
+    state.page_urls.write().await.clear();
     state
         .flows_capped
         .store(false, std::sync::atomic::Ordering::SeqCst);
@@ -265,9 +387,11 @@ async fn start_handler(State(state): State<AppState>) -> impl IntoResponse {
     let flows = Arc::clone(&state.flows);
     let capture_page = Arc::clone(&page);
     let flows_capped = Arc::clone(&state.flows_capped);
+    let page_urls = Arc::clone(&state.page_urls);
+    let session = Arc::clone(&state.session);
     let capture_task = tokio::spawn(async move {
         log::debug("capture task started");
-        match capture::capture(capture_page, flows, flows_capped).await {
+        match capture::capture(capture_page, flows, flows_capped, page_urls, session).await {
             Ok(()) => log::info("capture task ended (event listeners closed)"),
             Err(e) => log::error(&format!("capture task failed: {e:#}")),
         }
@@ -279,7 +403,9 @@ async fn start_handler(State(state): State<AppState>) -> impl IntoResponse {
         capture_task,
     });
 
-    log::info("recording started — panel window + recording browser (close recording with Stop, not ✕)");
+    log::info(
+        "recording started — panel window + recording browser (close recording with Stop, not ✕)",
+    );
     (StatusCode::OK, "Recording started").into_response()
 }
 
@@ -287,7 +413,9 @@ async fn recording_page(browser: &Browser) -> anyhow::Result<chromiumoxide::Page
     let pages = browser.pages().await.context("list browser tabs")?;
     let tab_count = pages.len();
     if let Some(page) = pages.into_iter().next() {
-        log::info(&format!("capture attached to main tab ({tab_count} tab(s) open)"));
+        log::info(&format!(
+            "capture attached to main tab ({tab_count} tab(s) open)"
+        ));
         return Ok(page);
     }
     log::info("no tabs yet — opening one");

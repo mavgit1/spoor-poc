@@ -4,7 +4,7 @@ use serde::Serialize;
 use url::Url;
 
 use crate::classify::ClassifiedEntry;
-use crate::export::auth::is_auth_query_param;
+use crate::redact::sensitive_query_param;
 
 /// Max distinct values listed per query param (session may have more).
 const MAX_EXAMPLES: usize = 8;
@@ -35,12 +35,13 @@ pub fn observe_for_origin(
         };
         for (k, v) in url.query_pairs() {
             let name = k.to_string();
-            if is_auth_query_param(&name) {
+            let val = v.to_string();
+            if sensitive_query_param(&name, &val) {
                 continue;
             }
             let stats = by_name.entry(name).or_default();
             stats.seen += 1;
-            stats.values.insert(v.to_string());
+            stats.values.insert(val);
         }
     }
 
@@ -87,31 +88,33 @@ fn build_observation(name: String, stats: ParamStats) -> QueryParamObservation {
 mod tests {
     use std::collections::HashMap;
 
+    use crate::capture::{CaptureRecord, Transport};
     use crate::classify::{ClassifiedEntry, Confidence, Protocol};
     use crate::ir::TrafficEntry;
-    use crate::types::CapturedFlow;
 
     use super::*;
 
     fn entry_with_url(url: &str) -> ClassifiedEntry {
         let parsed = url::Url::parse(url).unwrap();
-        let origin = format!(
-            "{}://{}",
-            parsed.scheme(),
-            parsed.host_str().expect("host")
-        );
+        let origin = format!("{}://{}", parsed.scheme(), parsed.host_str().expect("host"));
         ClassifiedEntry {
             entry: TrafficEntry {
-                flow: CapturedFlow {
+                flow: CaptureRecord {
                     id: "1".into(),
+                    transport: Transport::Http,
                     url: url.into(),
-                    method: "GET".into(),
+                    method: Some("GET".into()),
                     request_headers: HashMap::new(),
                     request_body: None,
                     status: Some(200),
                     response_headers: None,
                     response_body: None,
                     resource_type: None,
+                    sequence: 0,
+                    timestamp_ms: None,
+                    ws_request_id: None,
+                    ws_opcode: None,
+                    direction: None,
                 },
                 origin,
                 path: parsed.path().into(),
@@ -139,11 +142,17 @@ mod tests {
             ),
         ];
         let params = observe_for_origin(&classified, "https://portal.example.test");
-        let page = params.iter().find(|p| p.name == "page").expect("page param");
+        let page = params
+            .iter()
+            .find(|p| p.name == "page")
+            .expect("page param");
         assert_eq!(page.examples, vec!["0", "1", "2"]);
         assert_eq!(page.seen_on_requests, 4);
         assert!(page.note.as_deref().is_some_and(|n| n.contains("varied")));
-        let size = params.iter().find(|p| p.name == "size").expect("size param");
+        let size = params
+            .iter()
+            .find(|p| p.name == "size")
+            .expect("size param");
         assert_eq!(size.examples, vec!["20"]);
         assert_eq!(size.seen_on_requests, 4);
         assert!(size.note.is_none());
