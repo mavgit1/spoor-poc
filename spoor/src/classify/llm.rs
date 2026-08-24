@@ -19,7 +19,7 @@ pub async fn classify_batch(entries: &[TrafficEntry]) -> Vec<Protocol> {
     match classify_batch_inner(entries, &api_key).await {
         Ok(v) => v,
         Err(e) => {
-            log::warn(&format!("LLM classify failed: {e:#}"));
+            log::warn(format!("LLM classify failed: {e:#}"));
             entries.iter().map(|_| Protocol::Noise).collect()
         }
     }
@@ -47,7 +47,7 @@ async fn classify_batch_inner(
     let mut out = vec![Protocol::Noise; entries.len()];
     let take_n = ranked.len().min(MAX_AMBIGUOUS);
     if ranked.len() > MAX_AMBIGUOUS {
-        log::info(&format!(
+        log::info(format!(
             "LLM classify: {} ambiguous leftovers, scoring top {MAX_AMBIGUOUS} (rest → noise)",
             ranked.len()
         ));
@@ -58,7 +58,7 @@ async fn classify_batch_inner(
 
     let chunks: Vec<_> = selected_entries.chunks(BATCH_SIZE).collect();
     if chunks.len() > 1 {
-        log::info(&format!(
+        log::info(format!(
             "LLM classify: {} entries in {} batches of ≤{BATCH_SIZE}",
             selected_entries.len(),
             chunks.len()
@@ -69,7 +69,7 @@ async fn classify_batch_inner(
     for (batch_idx, chunk) in chunks.iter().enumerate() {
         let labels = classify_one_batch(&client, api_key, &model, chunk).await?;
         if labels.len() != chunk.len() {
-            log::warn(&format!(
+            log::warn(format!(
                 "LLM classify batch {}: got {} labels for {} entries — padding with noise",
                 batch_idx + 1,
                 labels.len(),
@@ -84,7 +84,7 @@ async fn classify_batch_inner(
     }
 
     let kept = out.iter().filter(|p| **p != Protocol::Noise).count();
-    log::info(&format!(
+    log::info(format!(
         "LLM classify done: {kept}/{} labeled non-noise ({} scored)",
         out.len(),
         take_n

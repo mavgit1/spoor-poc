@@ -26,8 +26,6 @@ jobs:
         working-directory: spoor
         run: cargo test
 
-      # Clippy will be promoted to `-D warnings` once the existing warning
-      # cleanup pass lands (currently ~68 warnings).
       - name: Clippy
         working-directory: spoor
-        run: cargo clippy --all-targets
+        run: cargo clippy --all-targets -- -D warnings

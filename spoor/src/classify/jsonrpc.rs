@@ -41,10 +41,9 @@ fn methods_from_body(entry: &TrafficEntry) -> Option<Vec<String>> {
                 .get("method")
                 .and_then(|v| v.as_str())
                 .filter(|s| !s.is_empty())
+                && !methods.iter().any(|x| x == m)
             {
-                if !methods.iter().any(|x| x == m) {
-                    methods.push(m.to_string());
-                }
+                methods.push(m.to_string());
             }
         }
         return if methods.is_empty() {

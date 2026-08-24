@@ -136,12 +136,21 @@ async fn bearer_auth(
         .get(header::AUTHORIZATION)
         .and_then(|v| v.to_str().ok())
         .and_then(|v| v.strip_prefix("Bearer "))
-        .is_some_and(|got| got == token.as_ref());
+        .is_some_and(|got| constant_time_eq(got.as_bytes(), token.as_bytes()));
     if authorized {
         Ok(next.run(req).await)
     } else {
         Err(StatusCode::UNAUTHORIZED)
     }
+}
+
+/// Compare without short-circuiting on the first differing byte, so response
+/// timing does not reveal how much of the token a caller guessed correctly.
+fn constant_time_eq(a: &[u8], b: &[u8]) -> bool {
+    if a.len() != b.len() {
+        return false;
+    }
+    a.iter().zip(b).fold(0u8, |acc, (x, y)| acc | (x ^ y)) == 0
 }
 
 pub async fn status_snapshot(state: &AppState) -> StatusSnapshot {

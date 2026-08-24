@@ -45,10 +45,10 @@ fn message_name(json: &Value) -> Option<String> {
     }
     // GraphQL subscription over WS: { type: "...", payload: { query } } already covered by type.
     // JSON-RPC over WS:
-    if json.get("jsonrpc").is_some() {
-        if let Some(m) = json.get("method").and_then(|v| v.as_str()) {
-            return Some(m.to_string());
-        }
+    if json.get("jsonrpc").is_some()
+        && let Some(m) = json.get("method").and_then(|v| v.as_str())
+    {
+        return Some(m.to_string());
     }
     None
 }

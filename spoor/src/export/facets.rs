@@ -50,10 +50,10 @@ pub fn extract_filter_catalog(
 
         if let Some(facets) = json.get("facets").and_then(|v| v.as_object()) {
             for (param, facet_body) in facets {
-                if let Some(map) = facet_body.as_object() {
-                    if looks_like_count_map(map) {
-                        merge_count_map(&mut by_param, param, &source, map);
-                    }
+                if let Some(map) = facet_body.as_object()
+                    && looks_like_count_map(map)
+                {
+                    merge_count_map(&mut by_param, param, &source, map);
                 }
             }
         }

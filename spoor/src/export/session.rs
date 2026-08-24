@@ -54,56 +54,57 @@ fn infer_depends_on_filtered(
 
     for item in &items {
         let op = op_label(item);
-        if let Some(resp) = item.entry.text_response() {
-            if let Ok(json) = serde_json::from_str::<Value>(resp) {
-                for (key, val) in collect_id_values(&json) {
-                    produced.entry(val).or_insert_with(|| {
-                        (
-                            op.clone(),
-                            item.entry.flow.sequence,
-                            item.entry.origin.clone(),
-                        )
-                    });
-                    let _ = key;
-                }
+        if let Some(resp) = item.entry.text_response()
+            && let Ok(json) = serde_json::from_str::<Value>(resp)
+        {
+            for (key, val) in collect_id_values(&json) {
+                produced.entry(val).or_insert_with(|| {
+                    (
+                        op.clone(),
+                        item.entry.flow.sequence,
+                        item.entry.origin.clone(),
+                    )
+                });
+                let _ = key;
             }
         }
         // Also scan URL path/query for id-like consumption
         if let Ok(url) = url::Url::parse(&item.entry.flow.url) {
             for (via, val) in url.query_pairs() {
                 let val = val.to_string();
-                if looks_like_id_value(&val) || looks_like_id_key(&via) {
-                    if let Some((from, seq, from_origin)) = produced.get(&val) {
-                        if *seq < item.entry.flow.sequence && from != &op {
-                            let key = (from.clone(), op.clone(), via.to_string());
-                            if seen_edges.insert(key.clone()) {
-                                edges.push(DependsOnEdge {
-                                    from: from.clone(),
-                                    to: op.clone(),
-                                    via: via.to_string(),
-                                    cross_origin: from_origin != &item.entry.origin,
-                                });
-                            }
-                        }
+                if (looks_like_id_value(&val) || looks_like_id_key(&via))
+                    && let Some((from, seq, from_origin)) = produced.get(&val)
+                    && *seq < item.entry.flow.sequence
+                    && from != &op
+                {
+                    let key = (from.clone(), op.clone(), via.to_string());
+                    if seen_edges.insert(key.clone()) {
+                        edges.push(DependsOnEdge {
+                            from: from.clone(),
+                            to: op.clone(),
+                            via: via.to_string(),
+                            cross_origin: from_origin != &item.entry.origin,
+                        });
                     }
                 }
             }
         }
-        if let Some(req) = item.entry.text_request() {
-            if let Ok(json) = serde_json::from_str::<Value>(req) {
-                for (via, val) in collect_id_values(&json) {
-                    if let Some((from, seq, from_origin)) = produced.get(&val) {
-                        if *seq < item.entry.flow.sequence && from != &op {
-                            let key = (from.clone(), op.clone(), via.clone());
-                            if seen_edges.insert(key.clone()) {
-                                edges.push(DependsOnEdge {
-                                    from: from.clone(),
-                                    to: op.clone(),
-                                    via,
-                                    cross_origin: from_origin != &item.entry.origin,
-                                });
-                            }
-                        }
+        if let Some(req) = item.entry.text_request()
+            && let Ok(json) = serde_json::from_str::<Value>(req)
+        {
+            for (via, val) in collect_id_values(&json) {
+                if let Some((from, seq, from_origin)) = produced.get(&val)
+                    && *seq < item.entry.flow.sequence
+                    && from != &op
+                {
+                    let key = (from.clone(), op.clone(), via.clone());
+                    if seen_edges.insert(key.clone()) {
+                        edges.push(DependsOnEdge {
+                            from: from.clone(),
+                            to: op.clone(),
+                            via,
+                            cross_origin: from_origin != &item.entry.origin,
+                        });
                     }
                 }
             }

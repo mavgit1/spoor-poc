@@ -17,14 +17,14 @@ pub async fn run_discover(state: &AppState) -> anyhow::Result<()> {
         .map(|c| format!("{} ({}×)", c.label, c.request_count))
         .collect();
     if !top.is_empty() {
-        crate::log::info(&format!(
+        crate::log::info(format!(
             "discovered {} candidates — top: {}",
             candidates.len(),
             top.join(", ")
         ));
     }
     if coverage.is_partial() {
-        crate::log::info(&format!(
+        crate::log::info(format!(
             "coverage: {} undecoded binary, {} ws frames, {} grpc/protobuf, capped={}",
             coverage.undecoded_binary,
             coverage.websocket_frames,

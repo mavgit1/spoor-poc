@@ -78,10 +78,10 @@ impl Body {
             };
         }
         // Prefer UTF-8 text when valid and mostly printable.
-        if let Ok(s) = std::str::from_utf8(&data) {
-            if looks_like_text(s) {
-                return Self::Text(s.to_string());
-            }
+        if let Ok(s) = std::str::from_utf8(&data)
+            && looks_like_text(s)
+        {
+            return Self::Text(s.to_string());
         }
         Self::Bytes { data, content_type }
     }

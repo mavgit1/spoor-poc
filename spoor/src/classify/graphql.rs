@@ -34,14 +34,14 @@ pub fn try_parse_operation(entry: &TrafficEntry) -> Option<String> {
     let doc = parse_query::<&str>(query).ok()?;
     let mut names = Vec::new();
     for def in &doc.definitions {
-        if let Definition::Operation(op) = def {
-            if let Some(n) = operation_name(op) {
-                names.push(n);
-            }
+        if let Definition::Operation(op) = def
+            && let Some(n) = operation_name(op)
+        {
+            names.push(n);
         }
     }
     if names.len() == 1 {
-        return Some(names.pop()?);
+        return names.pop();
     }
     if names.is_empty() {
         return Some(anonymous_label(query));

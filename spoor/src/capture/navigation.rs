@@ -35,7 +35,7 @@ pub async fn run(page: Arc<Page>, page_urls: Arc<RwLock<Vec<BrowsingPage>>>) -> 
         };
         let mut guard = page_urls.write().await;
         if guard.last().map(|p| p.url.as_str()) != Some(entry.url.as_str()) {
-            log::debug(&format!("navigation: {}", entry.url));
+            log::debug(format!("navigation: {}", entry.url));
             guard.push(entry);
         }
     }

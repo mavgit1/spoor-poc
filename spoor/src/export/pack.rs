@@ -492,10 +492,10 @@ fn resolve_selection(candidates: &[Candidate], req: &GenerateRequest) -> Vec<Sel
         let Some(cand) = candidates.iter().find(|c| c.id == sel.id) else {
             continue;
         };
-        if let Some(filter) = &req.origin {
-            if &cand.origin != filter {
-                continue;
-            }
+        if let Some(filter) = &req.origin
+            && &cand.origin != filter
+        {
+            continue;
         }
         let pattern = sel
             .pattern
@@ -548,8 +548,7 @@ fn surface_id(origin: &str, protocol: &str) -> String {
         .trim_start_matches("http://")
         .trim_start_matches("wss://")
         .trim_start_matches("ws://")
-        .replace('.', "-")
-        .replace(':', "-");
+        .replace(['.', ':'], "-");
     format!("{host}_{protocol}")
 }
 

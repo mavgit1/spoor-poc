@@ -57,8 +57,14 @@ pub async fn run(
     sequence: Arc<AtomicU64>,
     max_flows: usize,
 ) -> Result<()> {
-    let mut urls: HashMap<String, String> = HashMap::new();
-    let mut frame_seq: HashMap<String, u64> = HashMap::new();
+    let mut sink = FrameSink {
+        flows,
+        flows_capped,
+        sequence,
+        max_flows,
+        urls: HashMap::new(),
+        frame_seq: HashMap::new(),
+    };
 
     let mut created = page.event_listener::<EventWebSocketCreated>().await?;
     let mut sent = page.event_listener::<EventWebSocketFrameSent>().await?;
@@ -82,7 +88,7 @@ pub async fn run(
                     }
                     Some(ev) => {
                         let id = ev.request_id.inner().clone();
-                        urls.insert(id, ev.url.clone());
+                        sink.urls.insert(id, ev.url.clone());
                     }
                 }
             }
@@ -93,13 +99,7 @@ pub async fn run(
                         sent_open = false;
                     }
                     Some(ev) => {
-                        push_frame(
-                            &flows,
-                            &flows_capped,
-                            &sequence,
-                            max_flows,
-                            &urls,
-                            &mut frame_seq,
+                        sink.push(
                             ev.request_id.inner(),
                             &ev.response,
                             Direction::Outbound,
@@ -115,13 +115,7 @@ pub async fn run(
                         received_open = false;
                     }
                     Some(ev) => {
-                        push_frame(
-                            &flows,
-                            &flows_capped,
-                            &sequence,
-                            max_flows,
-                            &urls,
-                            &mut frame_seq,
+                        sink.push(
                             ev.request_id.inner(),
                             &ev.response,
                             Direction::Inbound,
@@ -136,26 +130,46 @@ pub async fn run(
     Ok(())
 }
 
-async fn push_frame(
-    flows: &Arc<RwLock<Vec<CaptureRecord>>>,
-    flows_capped: &Arc<AtomicBool>,
-    sequence: &Arc<AtomicU64>,
+/// Frame destination plus the per-connection state that must survive between
+/// CDP events: the URL each `requestId` was opened with, and a per-connection
+/// frame counter used to build stable record ids.
+struct FrameSink {
+    flows: Arc<RwLock<Vec<CaptureRecord>>>,
+    flows_capped: Arc<AtomicBool>,
+    sequence: Arc<AtomicU64>,
     max_flows: usize,
-    urls: &HashMap<String, String>,
-    frame_seq: &mut HashMap<String, u64>,
+    urls: HashMap<String, String>,
+    frame_seq: HashMap<String, u64>,
+}
+
+impl FrameSink {
+    async fn push(
+        &mut self,
+        request_id: &str,
+        frame: &WebSocketFrame,
+        direction: Direction,
+        timestamp_ms: u64,
+    ) {
+        push_frame(self, request_id, frame, direction, timestamp_ms).await
+    }
+}
+
+async fn push_frame(
+    sink: &mut FrameSink,
     request_id: &str,
     frame: &WebSocketFrame,
     direction: Direction,
     timestamp_ms: u64,
 ) {
-    let url = urls
+    let url = sink
+        .urls
         .get(request_id)
         .cloned()
         .unwrap_or_else(|| format!("ws://unknown/{request_id}"));
-    let n = frame_seq.entry(request_id.to_string()).or_insert(0);
+    let n = sink.frame_seq.entry(request_id.to_string()).or_insert(0);
     *n += 1;
     let frame_n = *n;
-    let seq = sequence.fetch_add(1, Ordering::SeqCst);
+    let seq = sink.sequence.fetch_add(1, Ordering::SeqCst);
     let body = frame_body(frame);
     let opcode = opcode_label(frame.opcode);
 
@@ -185,16 +199,16 @@ async fn push_frame(
         direction: Some(direction),
     };
 
-    log::debug(&format!(
+    log::debug(format!(
         "capture/ws: {:?} {} ({})",
         direction,
         record.url,
         record.ws_opcode.as_deref().unwrap_or("?")
     ));
 
-    let mut guard = flows.write().await;
-    if guard.len() >= max_flows {
-        flows_capped.store(true, Ordering::SeqCst);
+    let mut guard = sink.flows.write().await;
+    if guard.len() >= sink.max_flows {
+        sink.flows_capped.store(true, Ordering::SeqCst);
     } else {
         guard.push(record);
     }

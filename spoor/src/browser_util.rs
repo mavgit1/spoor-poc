@@ -165,7 +165,7 @@ fn profile_in_use(profile: &Path) -> bool {
 
 pub async fn cleanup_stale_profile_lock(profile: &Path) {
     if profile_in_use(profile) {
-        log::debug(&format!(
+        log::debug(format!(
             "profile in use, keeping locks: {}",
             profile.display()
         ));
@@ -174,10 +174,10 @@ pub async fn cleanup_stale_profile_lock(profile: &Path) {
     tokio::fs::create_dir_all(profile).await.ok();
     for name in ["SingletonLock", "SingletonSocket", "SingletonCookie"] {
         let lock = profile.join(name);
-        if tokio::fs::try_exists(&lock).await.unwrap_or(false) {
-            if tokio::fs::remove_file(&lock).await.is_ok() {
-                log::debug(&format!("removed stale lock {}", lock.display()));
-            }
+        if tokio::fs::try_exists(&lock).await.unwrap_or(false)
+            && tokio::fs::remove_file(&lock).await.is_ok()
+        {
+            log::debug(format!("removed stale lock {}", lock.display()));
         }
     }
 }
@@ -357,14 +357,14 @@ pub fn recording_config(executable: &Path) -> Result<BrowserConfig> {
 
 pub fn spawn_handler(mut handler: Handler, label: &'static str) -> JoinHandle<()> {
     tokio::spawn(async move {
-        log::debug(&format!("{label}: CDP handler started"));
+        log::debug(format!("{label}: CDP handler started"));
         while let Some(h) = handler.next().await {
             if let Err(e) = h {
-                log::warn(&format!("{label}: CDP handler error: {e:#}"));
+                log::warn(format!("{label}: CDP handler error: {e:#}"));
                 break;
             }
         }
-        log::info(&format!(
+        log::info(format!(
             "{label}: CDP connection ended (window closed or browser crashed)"
         ));
     })

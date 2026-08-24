@@ -156,12 +156,11 @@ pub fn drop_ignore_lines(content: &str, pattern: &str) -> String {
             continue;
         }
         // Drop legacy allow: lines tied to the same host/path when undoing.
-        if t.starts_with("allow:host:") {
-            if let Some(host) = pattern.trim().strip_prefix("host:") {
-                if t == format!("allow:host:{host}") {
-                    continue;
-                }
-            }
+        if t.starts_with("allow:host:")
+            && let Some(host) = pattern.trim().strip_prefix("host:")
+            && t == format!("allow:host:{host}")
+        {
+            continue;
         }
         kept.push(line);
     }
