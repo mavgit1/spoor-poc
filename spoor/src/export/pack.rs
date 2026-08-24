@@ -575,6 +575,19 @@ fn entry_matches_op(entry: &ClassifiedEntry, op: &SelectedOp, protocol: &str) ->
         return false;
     }
     match protocol {
+        // The collapsed "unidentified frames" candidate stands for every frame
+        // on its origin whose type could not be read, so it matches the whole
+        // set rather than one literal name.
+        "websocket"
+            if op.pattern == crate::classify::websocket::UNIDENTIFIED_PATTERN
+                || op.candidate.guessed_pattern
+                    == crate::classify::websocket::UNIDENTIFIED_PATTERN =>
+        {
+            entry
+                .operation_name
+                .as_deref()
+                .is_some_and(crate::classify::websocket::is_unidentified_message)
+        }
         "graphql" | "jsonrpc" | "websocket" => {
             entry.operation_name.as_deref() == Some(op.pattern.as_str())
                 || entry.operation_name.as_deref() == Some(op.candidate.guessed_pattern.as_str())

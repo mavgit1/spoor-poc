@@ -1,4 +1,5 @@
 pub mod api_origins;
+pub mod beacons;
 pub mod coverage;
 pub mod filters;
 pub mod form;
@@ -42,8 +43,8 @@ pub struct ClassifiedEntry {
 }
 
 /// Classify order (fixed):
-/// filter → GraphQL → JSON-RPC → gRPC/protobuf → form → REST (+ tRPC label)
-/// → WebSocket → LLM (text ambiguous only).
+/// filter → GraphQL → JSON-RPC → gRPC/protobuf → form → beacon drop
+/// → REST (+ tRPC label) → WebSocket → LLM (text ambiguous only).
 pub async fn classify_entries(entries: Vec<TrafficEntry>) -> Vec<ClassifiedEntry> {
     let ignore = filters::IgnoreRegistry::load();
     let mut out = Vec::new();
@@ -113,6 +114,13 @@ pub async fn classify_entries(entries: Vec<TrafficEntry>) -> Vec<ClassifiedEntry
                 confidence: Confidence::Parser,
                 operation_name: Some(label),
             });
+            continue;
+        }
+
+        // After the parsers, so a real GraphQL/JSON-RPC op served from a
+        // telemetry-looking path still wins. Before REST and the LLM, so
+        // beacons neither become candidates nor consume LLM budget.
+        if beacons::looks_like_beacon(&entry) {
             continue;
         }
 

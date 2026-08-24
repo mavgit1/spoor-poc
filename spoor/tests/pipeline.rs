@@ -234,6 +234,56 @@ async fn websocket_session_classify_and_discover() {
     assert!(candidates.iter().any(|c| c.protocol == "websocket"));
 }
 
+/// Frames whose type could not be read collapse into a single candidate, and
+/// selecting it must still yield a populated surface — the collapsed pattern is
+/// a set, not a literal message name, so export has to match it specially.
+#[tokio::test]
+async fn pack_collapsed_websocket_frames_produce_a_populated_surface() {
+    let flows = load_fixture("websocket_session");
+    let entries = ir::entries_from_flows(&flows);
+    let classified = classify::classify_entries(entries).await;
+    let candidates = discover::discover_candidates(&classified);
+
+    let unnamed: Vec<_> = candidates
+        .iter()
+        .filter(|c| c.protocol == "websocket" && c.guessed_pattern == "unidentified")
+        .collect();
+    assert_eq!(
+        unnamed.len(),
+        1,
+        "expected exactly one collapsed candidate, got {unnamed:?}"
+    );
+    let unnamed = unnamed[0];
+    assert_eq!(
+        unnamed.request_count, 2,
+        "both unnamed frames counted together"
+    );
+
+    let files = pack_files(
+        &classified,
+        &candidates,
+        &flows,
+        vec![GenerateSelection {
+            id: unnamed.id.clone(),
+            pattern: Some(unnamed.guessed_pattern.clone()),
+        }],
+    );
+
+    let op_file = files
+        .iter()
+        .find(|(name, _)| name.contains("/ops/") && name.ends_with(".yaml"))
+        .map(|(_, body)| body.clone())
+        .expect("collapsed candidate produced an op file");
+    assert!(
+        op_file.contains("request_count: 2"),
+        "op must carry the frames it matched, got:\n{op_file}"
+    );
+    assert!(
+        op_file.contains("example_request") || op_file.contains("example_response"),
+        "matched frames must supply an example, got:\n{op_file}"
+    );
+}
+
 #[tokio::test]
 async fn grpcweb_detect_classify_and_discover() {
     let flows = load_fixture("grpcweb_detect");

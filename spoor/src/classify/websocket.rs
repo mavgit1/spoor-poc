@@ -2,6 +2,20 @@ use serde_json::Value;
 
 use crate::ir::TrafficEntry;
 
+/// Labels `try_parse_message` falls back to when no message type could be read.
+///
+/// These describe the *frame encoding*, not an operation, so they must never be
+/// presented as discovered operations. Discover collapses them into a single
+/// honest "unidentified frames" candidate per origin.
+const UNIDENTIFIED_MESSAGES: &[&str] = &["text", "json", "binary", "frame"];
+
+/// Pattern standing for "any frame we could not name", on this origin.
+pub const UNIDENTIFIED_PATTERN: &str = "unidentified";
+
+pub fn is_unidentified_message(name: &str) -> bool {
+    UNIDENTIFIED_MESSAGES.contains(&name) || name == UNIDENTIFIED_PATTERN
+}
+
 /// Classify WebSocket frames: JSON message type / method / event, or binary.
 pub fn try_parse_message(entry: &TrafficEntry) -> Option<String> {
     if !entry.is_websocket() {

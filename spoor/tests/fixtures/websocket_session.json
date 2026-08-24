@@ -28,5 +28,35 @@
     "ws_request_id": "1",
     "ws_opcode": "text",
     "direction": "inbound"
+  },
+  {
+    "id": "ws-3",
+    "transport": "websocket",
+    "url": "wss://api.example.test/socket",
+    "request_headers": {},
+    "request_body": {"kind": "text", "text": "ping"},
+    "status": null,
+    "response_headers": null,
+    "response_body": null,
+    "resource_type": "WebSocket",
+    "sequence": 3,
+    "ws_request_id": "1",
+    "ws_opcode": "text",
+    "direction": "outbound"
+  },
+  {
+    "id": "ws-4",
+    "transport": "websocket",
+    "url": "wss://api.example.test/socket",
+    "request_headers": {},
+    "request_body": null,
+    "status": null,
+    "response_headers": null,
+    "response_body": {"kind": "text", "text": "{\"seq\":17,\"delta\":[1,2]}"},
+    "resource_type": "WebSocket",
+    "sequence": 4,
+    "ws_request_id": "1",
+    "ws_opcode": "text",
+    "direction": "inbound"
   }
 ]
