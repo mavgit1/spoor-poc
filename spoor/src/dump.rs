@@ -1,9 +1,12 @@
 use std::collections::BTreeMap;
-use std::io::Write;
+use std::io::{Read, Write};
+use std::path::Path;
 
+use anyhow::Context;
 use flate2::Compression;
+use flate2::read::GzDecoder;
 use flate2::write::GzEncoder;
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 
 use crate::capture::CaptureRecord;
 use crate::classify::{ClassifiedEntry, Confidence, CoverageReport, Protocol, protocol_str};
@@ -107,6 +110,39 @@ fn confidence_str(c: Confidence) -> &'static str {
     }
 }
 
+/// On-disk capture dump produced by [`build_capture_dump_gzip`]. Extra overlay
+/// fields (`classify`, coverage, …) are ignored — we only need the flows.
+#[derive(Deserialize)]
+struct CaptureDumpFile {
+    #[serde(default)]
+    flows_capped: bool,
+    flows: Vec<CaptureRecord>,
+}
+
+/// Load a `.json.gz` (or plain `.json`) capture dump. Gzip is detected by magic
+/// bytes so the extension can be wrong without failing.
+pub fn load_capture_dump(bytes: &[u8]) -> anyhow::Result<(Vec<CaptureRecord>, bool)> {
+    let json = maybe_decompress(bytes)?;
+    let dump: CaptureDumpFile = serde_json::from_slice(&json)?;
+    Ok((dump.flows, dump.flows_capped))
+}
+
+pub fn load_capture_dump_path(path: &Path) -> anyhow::Result<(Vec<CaptureRecord>, bool)> {
+    let bytes =
+        std::fs::read(path).with_context(|| format!("read capture dump {}", path.display()))?;
+    load_capture_dump(&bytes)
+}
+
+fn maybe_decompress(bytes: &[u8]) -> anyhow::Result<Vec<u8>> {
+    if bytes.starts_with(&[0x1f, 0x8b]) {
+        let mut raw = Vec::new();
+        GzDecoder::new(bytes).read_to_end(&mut raw)?;
+        Ok(raw)
+    } else {
+        Ok(bytes.to_vec())
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use std::collections::HashMap;
@@ -159,5 +195,11 @@ mod tests {
         assert_eq!(dump["flows"][0]["classify"]["protocol"], "jsonrpc");
         assert_eq!(dump["jsonrpc_methods"]["Alpha"], 1);
         assert!(dump["coverage"].is_object());
+
+        let (loaded, capped) = load_capture_dump(&gzip).unwrap();
+        assert!(!capped);
+        assert_eq!(loaded.len(), 1);
+        assert_eq!(loaded[0].id, "1");
+        assert_eq!(loaded[0].url, "https://api.example.test/jsonrpc");
     }
 }

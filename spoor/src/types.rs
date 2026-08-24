@@ -11,6 +11,7 @@ use tokio::task::JoinHandle;
 
 use crate::capture::CaptureRecord;
 use crate::classify::{ClassifiedEntry, CoverageReport};
+use crate::session::PersistHandle;
 
 pub use crate::capture::{Body, CapturedFlow, Direction, OmitReason, Transport};
 
@@ -107,22 +108,37 @@ pub struct AppState {
     pub flows_capped: Arc<AtomicBool>,
     pub coverage: Arc<RwLock<CoverageReport>>,
     pub page_urls: Arc<RwLock<Vec<BrowsingPage>>>,
+    /// Background session store. Armed in [`AppState::new`]; snapshots start
+    /// when [`AppState::set_recording`] goes true.
+    pub persist: PersistHandle,
 }
 
 impl AppState {
     pub fn new(chromium_executable: PathBuf) -> Self {
+        let flows = Arc::new(RwLock::new(Vec::new()));
+        let recording = Arc::new(AtomicBool::new(false));
+        let flows_capped = Arc::new(AtomicBool::new(false));
+        let page_urls = Arc::new(RwLock::new(Vec::new()));
+        let persist = PersistHandle::new();
+        persist.arm(
+            Arc::clone(&flows),
+            Arc::clone(&page_urls),
+            Arc::clone(&flows_capped),
+            Arc::clone(&recording),
+        );
         Self {
-            flows: Arc::new(RwLock::new(Vec::new())),
-            recording: Arc::new(AtomicBool::new(false)),
+            flows,
+            recording,
             session: Arc::new(Mutex::new(None)),
             analyzing: Arc::new(AtomicBool::new(false)),
             chromium_executable: Arc::new(chromium_executable),
             classified: Arc::new(RwLock::new(Vec::new())),
             candidates: Arc::new(RwLock::new(Vec::new())),
             export_bundle: Arc::new(RwLock::new(None)),
-            flows_capped: Arc::new(AtomicBool::new(false)),
+            flows_capped,
             coverage: Arc::new(RwLock::new(CoverageReport::default())),
-            page_urls: Arc::new(RwLock::new(Vec::new())),
+            page_urls,
+            persist,
         }
     }
 
@@ -132,6 +148,7 @@ impl AppState {
 
     pub fn set_recording(&self, value: bool) {
         self.recording.store(value, Ordering::SeqCst);
+        self.persist.notify_recording_changed();
     }
 
     pub fn is_analyzing(&self) -> bool {

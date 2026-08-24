@@ -12,5 +12,6 @@ pub mod log;
 pub mod path;
 pub mod pipeline;
 pub mod redact;
+pub mod session;
 pub mod types;
 pub mod ui;
