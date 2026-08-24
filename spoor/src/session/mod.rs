@@ -37,4 +37,5 @@ pub use persist::{PersistHandle, SNAPSHOT_INTERVAL};
 pub use store::{
     LoadedSession, SessionMeta, SessionStore, SessionSummary, SessionWriter, format_bytes,
     is_safe_session_id, keep_count, load_session_dir, load_source, max_bytes, new_session_id,
+    utc_now_rfc3339,
 };
