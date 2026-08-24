@@ -33,9 +33,12 @@ pub fn discover(classified: &[ClassifiedEntry]) -> Vec<Candidate> {
                 .trim_start_matches("ws://")
                 .to_string();
             let id = format!("ws|{origin}|{msg}");
+            // Host belongs in the label: several sockets on different hosts can
+            // all carry frames we could not name, and `WS · text` repeated five
+            // times tells the user nothing about which is which.
             Some(Candidate {
                 id,
-                label: format!("WS · {msg}"),
+                label: format!("WS {host} · {msg}"),
                 protocol: protocol_str(Protocol::WebSocket).to_string(),
                 guessed_pattern: msg,
                 example: item.entry.flow.url.clone(),
