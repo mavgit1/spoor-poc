@@ -19,6 +19,7 @@ use axum::response::{Html, Redirect};
 use axum::routing::get;
 use axum::{Json, Router};
 use chromiumoxide::Browser;
+use chromiumoxide::cdp::browser_protocol::target::CreateTargetParams;
 use spoor::browser_util;
 use spoor::capture::{self, CaptureRecord};
 use spoor::types::{BrowserSession, BrowsingPage};
@@ -65,6 +66,21 @@ async fn spawn_server() -> SocketAddr {
     addr
 }
 
+/// Per-test throwaway profile.
+///
+/// Chromium holds a `SingletonLock` per profile, so two tests launching on the
+/// shared recording profile collide and the second launch dies. It would also
+/// load the user's real cookies and history, which a test must never touch.
+fn scratch_profile(tag: &str) -> std::path::PathBuf {
+    let nanos = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_nanos())
+        .unwrap_or(0);
+    let dir = std::env::temp_dir().join(format!("spoor-smoke-{tag}-{nanos}"));
+    std::fs::create_dir_all(&dir).expect("create scratch profile");
+    dir
+}
+
 fn path_of(flow: &CaptureRecord) -> String {
     url::Url::parse(&flow.url)
         .map(|u| u.path().to_string())
@@ -84,7 +100,9 @@ async fn captures_redirects_bodies_and_second_target() {
     let chromium = browser_util::ensure_chromium()
         .await
         .expect("chromium available");
-    let config = browser_util::recording_config(&chromium).expect("recording config");
+    let profile = scratch_profile("redirects");
+    let config = browser_util::recording_config_with_profile(&chromium, profile.clone())
+        .expect("recording config");
     let (browser, handler) = Browser::launch(config).await.expect("launch browser");
     let handler_task = browser_util::spawn_handler(handler, "smoke");
 
@@ -133,17 +151,28 @@ async fn captures_redirects_bodies_and_second_target() {
 
     // Second target: exercises the Target.targetCreated path that new tabs and
     // window.open popups both go through.
-    let popup = {
+    //
+    // `Browser::new_page` waits for load, which needs the target to be resumed.
+    // Resume is driven by capture and must not require this lock, so create the
+    // target with a browser-level command that returns as soon as the id exists.
+    let popup_id = {
         let guard = session.lock().await;
         let browser = &guard.as_ref().expect("session present").browser;
         browser
-            .new_page("about:blank")
+            .execute(CreateTargetParams::new("about:blank"))
             .await
             .expect("open popup tab")
+            .result
+            .target_id
     };
     // Give capture time to attach before the target issues any request, so a
     // failure here means "never attached" rather than "attached too late".
     tokio::time::sleep(Duration::from_millis(1500)).await;
+    let popup = {
+        let guard = session.lock().await;
+        let browser = &guard.as_ref().expect("session present").browser;
+        browser.get_page(popup_id).await.expect("popup page")
+    };
     popup
         .goto(format!("{base}/popup"))
         .await
@@ -154,6 +183,7 @@ async fn captures_redirects_bodies_and_second_target() {
     taken.browser.close().await.ok();
     let _ = capture_task.await;
     let _ = taken.handler_task.await;
+    let _ = std::fs::remove_dir_all(&profile);
 
     let flows = flows.read().await.clone();
     let paths: Vec<String> = flows.iter().map(path_of).collect();
@@ -194,22 +224,26 @@ async fn captures_redirects_bodies_and_second_target() {
     );
 }
 
-/// Known gap: a target that navigates the instant it is created loses its
+/// Known gap. A target that navigates the instant it is created loses its
 /// opening requests, because capture only attaches after `Target.targetCreated`
-/// and then has to resolve the page and enable `Network`.
+/// and must then resolve the page and enable `Network`. This is the OAuth popup
+/// shape — `window.open` straight onto the provider's authorize URL — so the
+/// document request and its `Set-Cookie` redirect are exactly what we drop.
 ///
-/// The sibling test above sidesteps this by pausing before navigating. This one
-/// does not, and it is the shape that matters in practice: an OAuth popup opens
-/// straight onto the provider's authorize URL, so the document request and any
-/// immediate redirect are exactly what we drop.
+/// The sibling test above passes only because it pauses before navigating.
 ///
-/// The real fix is browser-level `Target.setAutoAttach` with
-/// `waitForDebuggerOnStart`, resuming via `Runtime.runIfWaitingForDebugger`
-/// once `Network` is enabled on the new session. chromiumoxide's handler does
-/// not send that resume for browser-level attachments, so it needs to be driven
-/// manually.
+/// An attempt at browser-level `Target.setAutoAttach` with
+/// `waitForDebuggerOnStart` was reverted: chromiumoxide's `Browser::execute`
+/// always sends `session_id: None`, and its target init issues its own
+/// `attachToTarget`, so the session that paused the target is not the `Page`'s
+/// session. Driving pause/resume from a second CDP client on the same browser
+/// websocket compiles and runs but still misses the opening requests — the
+/// `Page` cannot be resolved while the target is paused, so listeners cannot be
+/// armed before resume. Kept out of tree because an unresumed target is a
+/// frozen browser window for the user. Attempt preserved at
+/// `/tmp/spoor-attach-attempt.rs` for the next try.
 #[tokio::test(flavor = "multi_thread")]
-#[ignore = "known gap: early requests on a self-navigating new target are missed"]
+#[ignore = "known gap: early requests on a self-navigating target are missed"]
 async fn captures_first_request_of_a_self_navigating_target() {
     let addr = spawn_server().await;
     let base = format!("http://{addr}");
@@ -217,7 +251,9 @@ async fn captures_first_request_of_a_self_navigating_target() {
     let chromium = browser_util::ensure_chromium()
         .await
         .expect("chromium available");
-    let config = browser_util::recording_config(&chromium).expect("recording config");
+    let profile = scratch_profile("race");
+    let config = browser_util::recording_config_with_profile(&chromium, profile.clone())
+        .expect("recording config");
     let (browser, handler) = Browser::launch(config).await.expect("launch browser");
     let handler_task = browser_util::spawn_handler(handler, "smoke-race");
 
@@ -253,11 +289,13 @@ async fn captures_first_request_of_a_self_navigating_target() {
     tokio::time::sleep(Duration::from_millis(500)).await;
 
     // No pause between creation and navigation — this is what a popup does.
+    // `CreateTarget` returns the id without waiting for load, so this lock is
+    // not held across resume (which would deadlock Stop / freeze the popup).
     {
         let guard = session.lock().await;
         let browser = &guard.as_ref().expect("session present").browser;
         browser
-            .new_page(format!("{base}/popup"))
+            .execute(CreateTargetParams::new(format!("{base}/popup")))
             .await
             .expect("open popup tab");
     }
@@ -267,6 +305,7 @@ async fn captures_first_request_of_a_self_navigating_target() {
     taken.browser.close().await.ok();
     let _ = capture_task.await;
     let _ = taken.handler_task.await;
+    let _ = std::fs::remove_dir_all(&profile);
 
     let flows = flows.read().await.clone();
     assert!(

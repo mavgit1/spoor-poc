@@ -332,7 +332,16 @@ async fn fetch_bundled_chromium() -> Result<PathBuf> {
 
 /// Full-size headed browser for the user to browse the target site.
 pub fn recording_config(executable: &Path) -> Result<BrowserConfig> {
-    let profile = recording_profile_dir();
+    recording_config_with_profile(executable, recording_profile_dir())
+}
+
+/// Same launch hardening, explicit profile.
+///
+/// Tests need this: Chromium holds a `SingletonLock` per profile, so two
+/// concurrent launches on one profile fail, and the shared recording profile
+/// holds the user's real logins and history — a test must never load or mutate
+/// it. Production always uses [`recording_profile_dir`].
+pub fn recording_config_with_profile(executable: &Path, profile: PathBuf) -> Result<BrowserConfig> {
     let disable_dev_shm = needs_disable_dev_shm();
     let args = recording_chrome_args(disable_dev_shm);
     log_recording_argv(&args, &profile);
