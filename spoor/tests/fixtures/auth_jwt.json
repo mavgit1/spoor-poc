@@ -1,0 +1,18 @@
+[
+  {
+    "id": "acct-1",
+    "url": "https://api.example.test/v1/account",
+    "method": "GET",
+    "request_headers": {
+      "authorization": "Bearer eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJzdWIiOiJ1c2VyLTQyIiwibmFtZSI6IkFsaWNlIiwiaWF0IjoxNzAwMDAwMDAwLCJleHAiOjE3MDAwMDM2MDAsInJvbGUiOiJhZG1pbiJ9.fakesignature"
+    },
+    "status": 200,
+    "response_headers": {
+      "content-type": "application/json"
+    },
+    "response_body": "{\"id\":\"acct-1\"}",
+    "resource_type": "Fetch",
+    "sequence": 0,
+    "timestamp_ms": 1700002000000
+  }
+]

@@ -4,6 +4,7 @@
 //!   MANIFEST.yaml
 //!   relations.yaml
 //!   surfaces/{surface_id}/surface.yaml
+//!   surfaces/{surface_id}/auth.yaml
 //!   surfaces/{surface_id}/operations.yaml
 //!   surfaces/{surface_id}/observations.yaml
 //!   surfaces/{surface_id}/ops/{op_slug}.yaml
@@ -15,7 +16,7 @@ use serde_json::Value;
 
 use crate::capture::CaptureRecord;
 use crate::classify::{ClassifiedEntry, CoverageReport, Protocol};
-use crate::export::auth::{self, AuthObservation};
+use crate::export::auth::{self, AuthDocument};
 use crate::export::example_pick;
 use crate::export::facets::{self, FilterParamCatalog};
 use crate::export::observations::{self, Observation};
@@ -63,7 +64,7 @@ struct SurfaceDoc {
     protocol: String,
     /// Observed addressing from traffic — not an invented contract.
     addressing: Addressing,
-    auth: Vec<AuthObservation>,
+    auth: AuthDocument,
     #[serde(skip_serializing_if = "Vec::is_empty")]
     common_query_params: Vec<QueryParamObservation>,
     #[serde(skip_serializing_if = "Vec::is_empty")]
@@ -196,6 +197,7 @@ pub fn build_pack_files(
     page_urls: &[BrowsingPage],
 ) -> anyhow::Result<Vec<(String, String)>> {
     let redact = req.redact;
+    let mut secrets: Vec<String> = Vec::new();
     let selected = resolve_selection(candidates, req);
     if selected.is_empty() {
         anyhow::bail!("no export artifacts produced for selection");
@@ -269,17 +271,9 @@ pub fn build_pack_files(
             session::coverage_for_origin(flows, classified, origin, coverage.flows_capped)
         };
 
-        let auth = {
-            let mut auth = auth::observe_for_origin(classified, origin);
-            if redact {
-                for a in &mut auth {
-                    if let Some(ex) = a.example.as_mut() {
-                        *ex = "[REDACTED]".into();
-                    }
-                }
-            }
-            auth
-        };
+        let auth =
+            auth::observe_for_origin(classified, origin, flows, &flow_to_op, &surface_id, false);
+        secrets.extend(auth.secrets_for_scrub());
         let common_query_params = query_params::observe_for_origin(classified, origin);
         let filter_catalog = facets::extract_filter_catalog(classified, origin);
         let addressing = build_addressing(&surface_entries, protocol);
@@ -290,7 +284,7 @@ pub fn build_pack_files(
             origin: origin.clone(),
             protocol: protocol.clone(),
             addressing,
-            auth,
+            auth: auth.clone(),
             common_query_params,
             filter_catalog,
             coverage: cov,
@@ -298,6 +292,10 @@ pub fn build_pack_files(
         files.push((
             format!("{surface_dir}/surface.yaml"),
             serde_yaml_ng::to_string(&surface_doc)?,
+        ));
+        files.push((
+            format!("{surface_dir}/auth.yaml"),
+            serde_yaml_ng::to_string(&auth)?,
         ));
 
         let mut index_ops = Vec::new();
@@ -351,6 +349,7 @@ pub fn build_pack_files(
         ));
 
         read_order.push(format!("{surface_dir}/surface.yaml"));
+        read_order.push(format!("{surface_dir}/auth.yaml"));
         read_order.push(format!("{surface_dir}/operations.yaml"));
         read_order.push(format!("{surface_dir}/observations.yaml"));
         read_order.extend(op_read_paths);
@@ -447,6 +446,10 @@ pub fn build_pack_files(
                 .into(),
         );
     }
+    limitations.push(
+        "Credential values are omitted from this pack (shape only); live secrets are not included"
+            .into(),
+    );
 
     let manifest = Manifest {
         spoor_version: 3,
@@ -473,6 +476,12 @@ pub fn build_pack_files(
             })?,
         ),
     );
+
+    if !secrets.is_empty() {
+        for (_, body) in &mut files {
+            *body = crate::auth::scrub_secrets(body, &secrets);
+        }
+    }
 
     Ok(files)
 }

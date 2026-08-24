@@ -1,0 +1,51 @@
+[
+  {
+    "id": "oauth-1",
+    "url": "https://api.example.test/oauth/token",
+    "method": "POST",
+    "request_headers": {
+      "content-type": "application/json"
+    },
+    "request_body": "{\"grant_type\":\"password\",\"username\":\"ada\"}",
+    "status": 200,
+    "response_headers": {
+      "content-type": "application/json"
+    },
+    "response_body": "{\"access_token\":\"tok_live_abcdefghijklmnopqrstuvwxyz012345\",\"token_type\":\"Bearer\"}",
+    "resource_type": "Fetch",
+    "sequence": 0,
+    "timestamp_ms": 1700001000000
+  },
+  {
+    "id": "me-1",
+    "url": "https://api.example.test/v1/me",
+    "method": "GET",
+    "request_headers": {
+      "authorization": "Bearer tok_live_abcdefghijklmnopqrstuvwxyz012345"
+    },
+    "status": 200,
+    "response_headers": {
+      "content-type": "application/json"
+    },
+    "response_body": "{\"id\":\"acct-1\",\"email\":\"ada@example.test\"}",
+    "resource_type": "Fetch",
+    "sequence": 1,
+    "timestamp_ms": 1700001001000
+  },
+  {
+    "id": "orders-1",
+    "url": "https://api.example.test/v1/orders",
+    "method": "GET",
+    "request_headers": {
+      "authorization": "Bearer tok_live_abcdefghijklmnopqrstuvwxyz012345"
+    },
+    "status": 200,
+    "response_headers": {
+      "content-type": "application/json"
+    },
+    "response_body": "{\"items\":[]}",
+    "resource_type": "Fetch",
+    "sequence": 2,
+    "timestamp_ms": 1700001002000
+  }
+]

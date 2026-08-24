@@ -1,0 +1,64 @@
+[
+  {
+    "id": "login#0",
+    "url": "https://app.example.test/login",
+    "method": "POST",
+    "request_headers": {
+      "content-type": "application/x-www-form-urlencoded"
+    },
+    "request_body": "user=ada&pass=not-the-session-cookie",
+    "status": 302,
+    "response_headers": {
+      "set-cookie": "sid=s3cretSidValue0123456789abcdef; Path=/; HttpOnly",
+      "location": "https://app.example.test/app"
+    },
+    "resource_type": "Fetch",
+    "sequence": 0,
+    "timestamp_ms": 1700002000000
+  },
+  {
+    "id": "login#1",
+    "url": "https://app.example.test/app",
+    "method": "GET",
+    "status": 200,
+    "response_headers": {
+      "content-type": "text/html"
+    },
+    "response_body": "<html></html>",
+    "resource_type": "Document",
+    "sequence": 1,
+    "timestamp_ms": 1700002000500
+  },
+  {
+    "id": "api-me",
+    "url": "https://app.example.test/api/me",
+    "method": "GET",
+    "request_headers": {
+      "cookie": "sid=s3cretSidValue0123456789abcdef"
+    },
+    "status": 200,
+    "response_headers": {
+      "content-type": "application/json"
+    },
+    "response_body": "{\"ok\":true}",
+    "resource_type": "Fetch",
+    "sequence": 2,
+    "timestamp_ms": 1700002001000
+  },
+  {
+    "id": "api-items",
+    "url": "https://app.example.test/api/items",
+    "method": "GET",
+    "request_headers": {
+      "cookie": "sid=s3cretSidValue0123456789abcdef"
+    },
+    "status": 200,
+    "response_headers": {
+      "content-type": "application/json"
+    },
+    "response_body": "{\"items\":[]}",
+    "resource_type": "Fetch",
+    "sequence": 3,
+    "timestamp_ms": 1700002002000
+  }
+]

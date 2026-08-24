@@ -15,7 +15,15 @@ scripts/
 .cursor/
 
 # Rust build output
+/target
 spoor/target/
+spoor-app/src-tauri/target/
+
+# Desktop app frontend
+spoor-app/node_modules/
+spoor-app/build/
+spoor-app/.svelte-kit/
+spoor-app/dist/
 
 # macOS
 .DS_Store

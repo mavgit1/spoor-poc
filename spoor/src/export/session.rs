@@ -119,7 +119,7 @@ fn op_label(item: &ClassifiedEntry) -> String {
         .unwrap_or_else(|| format!("{} {}", item.entry.http_method(), item.entry.path))
 }
 
-fn collect_id_values(json: &Value) -> Vec<(String, String)> {
+pub(crate) fn collect_id_values(json: &Value) -> Vec<(String, String)> {
     let mut out = Vec::new();
     walk_ids(json, &mut out);
     out
@@ -155,7 +155,7 @@ fn looks_like_id_key(key: &str) -> bool {
         || key.eq_ignore_ascii_case("uuid")
 }
 
-fn looks_like_id_value(s: &str) -> bool {
+pub(crate) fn looks_like_id_value(s: &str) -> bool {
     if s.len() < 8 || s.len() > 64 {
         return false;
     }

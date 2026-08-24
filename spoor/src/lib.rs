@@ -1,7 +1,9 @@
+pub mod auth;
 pub mod browser_util;
 pub mod cache_dir;
 pub mod capture;
 pub mod classify;
+pub mod cli;
 pub mod discover;
 pub mod dump;
 pub mod export;
