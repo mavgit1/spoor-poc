@@ -4,6 +4,7 @@ import type {
   FilterOutcome,
   GenerateOutcome,
   GenerateSelection,
+  SessionsSnapshot,
   StatusSnapshot,
 } from './types';
 
@@ -43,4 +44,20 @@ export function setFilter(
   action: 'ignore' | 'allow',
 ): Promise<FilterOutcome> {
   return invoke('set_filter', { pattern, action });
+}
+
+export function listSessions(): Promise<SessionsSnapshot> {
+  return invoke('list_sessions');
+}
+
+export function loadSession(id: string): Promise<StatusSnapshot> {
+  return invoke('load_session', { id });
+}
+
+export function deleteSession(id: string): Promise<SessionsSnapshot> {
+  return invoke('delete_session', { id });
+}
+
+export function deleteAllSessions(): Promise<SessionsSnapshot> {
+  return invoke('delete_all_sessions');
 }

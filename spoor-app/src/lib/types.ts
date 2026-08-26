@@ -59,6 +59,27 @@ export type FilterOutcome = {
   action: string;
 };
 
+export type StoredSessionItem = {
+  id: string;
+  started_at: string;
+  ended_at: string | null;
+  flow_count: number;
+  size_bytes: number;
+  size_label: string;
+  gzipped: boolean;
+  flows_capped: boolean;
+};
+
+export type SessionsSnapshot = {
+  sessions: StoredSessionItem[];
+  store_path: string;
+  keep: number;
+  max_bytes: number;
+  max_label: string;
+  total_bytes: number;
+  total_label: string;
+};
+
 export type DiscoverFinished = {
   ok: boolean;
   error: string | null;

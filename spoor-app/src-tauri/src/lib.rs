@@ -4,9 +4,10 @@ use std::time::Duration;
 use serde::Serialize;
 use spoor::types::{AppState, FilterPreferenceRequest, GenerateRequest, GenerateSelection};
 use spoor::ui::{
-    candidates_snapshot, capture_dump_gzip, export_zip_bytes, generate_export,
-    persist_filter_preference, run_discover_session, start_recording, status_snapshot,
-    stop_recording, CandidatesSnapshot, FilterOutcome, GenerateOutcome, StatusSnapshot,
+    candidates_snapshot, capture_dump_gzip, delete_all_stored_sessions, delete_stored_session,
+    export_zip_bytes, generate_export, load_stored_session, persist_filter_preference,
+    run_discover_session, sessions_snapshot, start_recording, status_snapshot, stop_recording,
+    CandidatesSnapshot, FilterOutcome, GenerateOutcome, SessionsSnapshot, StatusSnapshot,
 };
 use tauri::menu::{Menu, MenuItem};
 use tauri::tray::{MouseButton, TrayIconBuilder, TrayIconEvent};
@@ -78,12 +79,7 @@ async fn do_start(app: &AppHandle, state: &AppState) -> Result<(), String> {
     Ok(())
 }
 
-async fn do_stop(app: &AppHandle, state: &AppState) -> Result<(), String> {
-    stop_recording(state).await.map_err(|e| e.to_string())?;
-    emit_status(app, state).await;
-
-    let app = app.clone();
-    let state = state.clone();
+fn spawn_discover(app: AppHandle, state: AppState) {
     tauri::async_runtime::spawn(async move {
         let result = run_discover_session(&state).await;
         let snap = candidates_snapshot(&state).await;
@@ -96,6 +92,21 @@ async fn do_stop(app: &AppHandle, state: &AppState) -> Result<(), String> {
         let _ = app.emit("discover-finished", &payload);
         emit_status(&app, &state).await;
     });
+}
+
+async fn do_stop(app: &AppHandle, state: &AppState) -> Result<(), String> {
+    stop_recording(state).await.map_err(|e| e.to_string())?;
+    emit_status(app, state).await;
+    spawn_discover(app.clone(), state.clone());
+    Ok(())
+}
+
+async fn do_load_session(app: &AppHandle, state: &AppState, id: &str) -> Result<(), String> {
+    load_stored_session(state, id)
+        .await
+        .map_err(|e| e.to_string())?;
+    emit_status(app, state).await;
+    spawn_discover(app.clone(), state.clone());
     Ok(())
 }
 
@@ -231,6 +242,33 @@ fn set_filter(pattern: String, action: String) -> Result<FilterOutcome, String> 
         .map_err(|e| e.to_string())
 }
 
+#[tauri::command]
+fn list_sessions() -> Result<SessionsSnapshot, String> {
+    sessions_snapshot().map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+async fn load_session(
+    app: AppHandle,
+    state: State<'_, AppState>,
+    id: String,
+) -> Result<StatusSnapshot, String> {
+    do_load_session(&app, &state, &id).await?;
+    Ok(status_snapshot(&state).await)
+}
+
+#[tauri::command]
+fn delete_session(state: State<'_, AppState>, id: String) -> Result<SessionsSnapshot, String> {
+    delete_stored_session(&state, &id).map_err(|e| e.to_string())?;
+    sessions_snapshot().map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+fn delete_all_sessions(state: State<'_, AppState>) -> Result<SessionsSnapshot, String> {
+    delete_all_stored_sessions(&state).map_err(|e| e.to_string())?;
+    sessions_snapshot().map_err(|e| e.to_string())
+}
+
 fn setup_tray(app: &tauri::App) -> tauri::Result<()> {
     let show = MenuItem::with_id(app, "show", "Show Spoor", true, None::<&str>)?;
     let record = MenuItem::with_id(app, "record", "Start recording", true, None::<&str>)?;
@@ -314,7 +352,11 @@ pub fn run() {
             generate,
             save_export,
             save_dump,
-            set_filter
+            set_filter,
+            list_sessions,
+            load_session,
+            delete_session,
+            delete_all_sessions
         ])
         .build(tauri::generate_context!())
         .expect("error while building Spoor")

@@ -3,14 +3,19 @@
   import { listen } from '@tauri-apps/api/event';
   import { SvelteMap, SvelteSet } from 'svelte/reactivity';
   import SurfaceList from '$lib/SurfaceList.svelte';
+  import SessionsPanel from '$lib/SessionsPanel.svelte';
   import {
     buildApiGroups,
     formatStatusLine,
     preferencePattern,
   } from '$lib/groups';
   import {
+    deleteAllSessions,
+    deleteSession,
     generatePack,
     getStatus,
+    listSessions,
+    loadSession,
     saveDump,
     saveExport,
     setFilter,
@@ -22,6 +27,7 @@
     Candidate,
     DiscoverFinished,
     OpState,
+    SessionsSnapshot,
     StatusSnapshot,
   } from '$lib/types';
 
@@ -56,6 +62,7 @@
   let warn = $state('');
   let redact = $state(false);
   let busy = $state(false);
+  let sessions = $state.raw<SessionsSnapshot | null>(null);
 
   let apiGroups = $derived(buildApiGroups(candidates));
   let candidatesLoaded = $derived(candidates.length > 0);
@@ -124,6 +131,51 @@
 
   function selectNone() {
     for (const g of apiGroups) toggleGroup(g, false);
+  }
+
+  async function refreshSessions() {
+    try {
+      sessions = await listSessions();
+    } catch (e) {
+      error = String(e);
+    }
+  }
+
+  async function onLoadSession(id: string) {
+    error = '';
+    warn = '';
+    adoptCandidates([]);
+    busy = true;
+    try {
+      status = await loadSession(id);
+      warn = `Loaded ${id}`;
+    } catch (e) {
+      error = String(e);
+    } finally {
+      busy = false;
+    }
+  }
+
+  async function onDeleteSession(id: string) {
+    error = '';
+    warn = '';
+    try {
+      sessions = await deleteSession(id);
+      warn = `Deleted ${id}`;
+    } catch (e) {
+      error = String(e);
+    }
+  }
+
+  async function onDeleteAllSessions() {
+    error = '';
+    warn = '';
+    try {
+      sessions = await deleteAllSessions();
+      warn = 'Deleted all captured sessions';
+    } catch (e) {
+      error = String(e);
+    }
   }
 
   async function onStart() {
@@ -248,6 +300,7 @@
       .catch((e) => {
         error = String(e);
       });
+    refreshSessions();
 
     listen<StatusSnapshot>('status', (e) => {
       status = e.payload;
@@ -266,9 +319,11 @@
     listen<DiscoverFinished>('discover-finished', (e) => {
       if (!e.payload.ok) {
         error = e.payload.error || 'Discover failed';
+        void refreshSessions();
         return;
       }
       adoptCandidates(e.payload.candidates);
+      void refreshSessions();
     }).then((u) => {
       if (cancelled) u();
       else unsubs.push(u);
@@ -370,6 +425,16 @@
     </label>
   </div>
 {/if}
+
+<SessionsPanel
+  snapshot={sessions}
+  recording={status.recording}
+  analyzing={status.analyzing}
+  {busy}
+  onload={onLoadSession}
+  ondelete={onDeleteSession}
+  ondeleteall={onDeleteAllSessions}
+/>
 
 <style>
   .card {

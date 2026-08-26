@@ -21,6 +21,7 @@ use crate::export;
 use crate::ir;
 use crate::log;
 use crate::pipeline;
+use crate::session::{SessionStore, format_bytes, is_safe_session_id, keep_count, max_bytes};
 use crate::types::{AppState, BrowserSession, Candidate, FilterPreferenceRequest, GenerateRequest};
 
 /// Session/API failure with an HTTP-equivalent class for the headless router.
@@ -104,6 +105,29 @@ pub struct FilterOutcome {
     pub message: String,
     pub config_path: String,
     pub action: String,
+}
+
+#[derive(Serialize, Clone, Debug)]
+pub struct StoredSessionItem {
+    pub id: String,
+    pub started_at: String,
+    pub ended_at: Option<String>,
+    pub flow_count: usize,
+    pub size_bytes: u64,
+    pub size_label: String,
+    pub gzipped: bool,
+    pub flows_capped: bool,
+}
+
+#[derive(Serialize, Clone, Debug)]
+pub struct SessionsSnapshot {
+    pub sessions: Vec<StoredSessionItem>,
+    pub store_path: String,
+    pub keep: usize,
+    pub max_bytes: u64,
+    pub max_label: String,
+    pub total_bytes: u64,
+    pub total_label: String,
 }
 
 /// Headless HTTP API. Every route requires `Authorization: Bearer <token>`.
@@ -463,6 +487,130 @@ pub fn persist_filter_preference(
     }
 }
 
+pub fn sessions_snapshot() -> Result<SessionsSnapshot, SessionError> {
+    sessions_snapshot_from(&SessionStore::default_store())
+}
+
+fn sessions_snapshot_from(store: &SessionStore) -> Result<SessionsSnapshot, SessionError> {
+    let list = store
+        .list()
+        .map_err(|e| SessionError::Failed(e.to_string()))?;
+    let total_bytes: u64 = list.iter().map(|s| s.size_bytes).sum();
+    let cap = max_bytes();
+    Ok(SessionsSnapshot {
+        sessions: list
+            .into_iter()
+            .map(|s| StoredSessionItem {
+                id: s.meta.id,
+                started_at: s.meta.started_at,
+                ended_at: s.meta.ended_at,
+                flow_count: s.meta.flow_count,
+                size_bytes: s.size_bytes,
+                size_label: format_bytes(s.size_bytes),
+                gzipped: s.meta.gzipped,
+                flows_capped: s.meta.flows_capped,
+            })
+            .collect(),
+        store_path: store.root().display().to_string(),
+        keep: keep_count(),
+        max_bytes: cap,
+        max_label: format_bytes(cap),
+        total_bytes,
+        total_label: format_bytes(total_bytes),
+    })
+}
+
+fn refuse_if_recording(state: &AppState, action: &str) -> Result<(), SessionError> {
+    if state.is_recording() {
+        return Err(SessionError::Conflict(format!(
+            "Cannot {action} while recording is in progress. Stop first so the current capture is fully written."
+        )));
+    }
+    Ok(())
+}
+
+/// Load a stored session into `state`. Does **not** run discover — caller must,
+/// same as after Stop.
+pub async fn load_stored_session(state: &AppState, id: &str) -> Result<(), SessionError> {
+    load_stored_session_from(state, SessionStore::default_store(), id).await
+}
+
+async fn load_stored_session_from(
+    state: &AppState,
+    store: SessionStore,
+    id: &str,
+) -> Result<(), SessionError> {
+    refuse_if_recording(state, "load a stored session")?;
+    if state.is_analyzing() {
+        return Err(SessionError::Conflict(
+            "Cannot load a stored session while discovery is running.".into(),
+        ));
+    }
+    if !is_safe_session_id(id) {
+        return Err(SessionError::BadRequest("Invalid session id".into()));
+    }
+    let id_owned = id.to_string();
+    let loaded = tokio::task::spawn_blocking(move || store.load(&id_owned))
+        .await
+        .map_err(|e| SessionError::Failed(e.to_string()))?
+        .map_err(|e| SessionError::Failed(e.to_string()))?;
+
+    let n = loaded.flows.len();
+    let sid = loaded.meta.id.clone();
+    *state.flows.write().await = loaded.flows;
+    *state.page_urls.write().await = loaded.meta.pages;
+    state.flows_capped.store(
+        loaded.meta.flows_capped,
+        std::sync::atomic::Ordering::SeqCst,
+    );
+    *state.export_bundle.write().await = None;
+    *state.candidates.write().await = Vec::new();
+    *state.classified.write().await = Vec::new();
+    *state.coverage.write().await = crate::classify::CoverageReport::default();
+    log::info(format!("loaded session {sid} — {n} flow(s)"));
+    Ok(())
+}
+
+pub fn delete_stored_session(state: &AppState, id: &str) -> Result<(), SessionError> {
+    refuse_if_recording(state, "delete a stored session")?;
+    delete_stored_session_from(&SessionStore::default_store(), id)
+}
+
+fn delete_stored_session_from(store: &SessionStore, id: &str) -> Result<(), SessionError> {
+    if !is_safe_session_id(id) {
+        return Err(SessionError::BadRequest("Invalid session id".into()));
+    }
+    let dir = store.session_dir(id);
+    if !dir.join("meta.json").is_file() {
+        return Err(SessionError::NotFound(format!("No stored session {id}")));
+    }
+    std::fs::remove_dir_all(&dir)
+        .map_err(|e| SessionError::Failed(format!("Failed to delete session {id}: {e}")))?;
+    log::info(format!("deleted session {id}"));
+    Ok(())
+}
+
+pub fn delete_all_stored_sessions(state: &AppState) -> Result<usize, SessionError> {
+    refuse_if_recording(state, "delete stored sessions")?;
+    delete_all_stored_sessions_from(&SessionStore::default_store())
+}
+
+fn delete_all_stored_sessions_from(store: &SessionStore) -> Result<usize, SessionError> {
+    let list = store
+        .list()
+        .map_err(|e| SessionError::Failed(e.to_string()))?;
+    let n = list.len();
+    for s in &list {
+        std::fs::remove_dir_all(&s.path).map_err(|e| {
+            SessionError::Failed(format!("Failed to delete session {}: {e}", s.meta.id))
+        })?;
+    }
+    if n > 0 {
+        log::info(format!("deleted {n} stored session(s)"));
+    }
+    Ok(n)
+}
+
 pub async fn capture_dump_gzip(state: &AppState) -> Result<Vec<u8>, SessionError> {
     if state.is_recording() {
         return Err(SessionError::Conflict(
@@ -627,6 +775,127 @@ mod tests {
         })
         .unwrap_err();
         assert!(matches!(err, SessionError::BadRequest(_)));
+    }
+
+    fn temp_sessions_dir() -> PathBuf {
+        use std::sync::atomic::{AtomicU64, Ordering};
+        static N: AtomicU64 = AtomicU64::new(0);
+        let dir = std::env::temp_dir().join(format!(
+            "spoor-ui-sessions-{}-{}",
+            std::process::id(),
+            N.fetch_add(1, Ordering::SeqCst)
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    fn seed_auth_bearer(store_root: &std::path::Path) -> String {
+        let src =
+            PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/sessions/auth_bearer");
+        let id = "fixture-auth-bearer";
+        let dst = store_root.join(id);
+        std::fs::create_dir_all(&dst).unwrap();
+        std::fs::copy(src.join("meta.json"), dst.join("meta.json")).unwrap();
+        std::fs::copy(src.join("flows.jsonl"), dst.join("flows.jsonl")).unwrap();
+        id.to_string()
+    }
+
+    #[test]
+    fn sessions_list_is_newest_first_and_reports_retention() {
+        let dir = temp_sessions_dir();
+        seed_auth_bearer(&dir);
+        let store = SessionStore::at(&dir);
+        let snap = sessions_snapshot_from(&store).unwrap();
+        assert_eq!(snap.sessions.len(), 1);
+        assert_eq!(snap.sessions[0].id, "fixture-auth-bearer");
+        assert_eq!(snap.sessions[0].flow_count, 3);
+        assert!(!snap.sessions[0].size_label.is_empty());
+        assert_eq!(snap.store_path, dir.display().to_string());
+        assert!(snap.keep > 0);
+        assert!(snap.max_bytes > 0);
+        assert!(snap.max_label.contains('B'));
+    }
+
+    #[tokio::test]
+    async fn load_session_refused_while_recording() {
+        let state = AppState::new(PathBuf::from("/nonexistent"));
+        state
+            .recording
+            .store(true, std::sync::atomic::Ordering::SeqCst);
+        let store = SessionStore::at(temp_sessions_dir());
+        let err = load_stored_session_from(&state, store, "fixture-auth-bearer")
+            .await
+            .unwrap_err();
+        assert!(matches!(err, SessionError::Conflict(_)));
+        assert!(err.to_string().contains("recording"));
+    }
+
+    #[test]
+    fn delete_session_refused_while_recording() {
+        let state = AppState::new(PathBuf::from("/nonexistent"));
+        state
+            .recording
+            .store(true, std::sync::atomic::Ordering::SeqCst);
+        let err = delete_stored_session(&state, "fixture-auth-bearer").unwrap_err();
+        assert!(matches!(err, SessionError::Conflict(_)));
+        assert!(err.to_string().contains("recording"));
+    }
+
+    #[tokio::test]
+    async fn load_stored_session_populates_candidates_unchecked() {
+        crate::pipeline::disable_llm();
+        let dir = temp_sessions_dir();
+        let id = seed_auth_bearer(&dir);
+        let store = SessionStore::at(&dir);
+        let state = AppState::new(PathBuf::from("/nonexistent"));
+        load_stored_session_from(&state, store, &id)
+            .await
+            .expect("load");
+        assert_eq!(state.flows.read().await.len(), 3);
+        assert!(state.export_bundle.read().await.is_none());
+        run_discover_session(&state).await.expect("discover");
+        let snap = candidates_snapshot(&state).await;
+        assert_eq!(snap.candidates.len(), 3);
+        assert!(
+            snap.candidates.iter().all(|c| !c.default_selected),
+            "patterns are pre-filled, never pre-selected"
+        );
+        let selected = snap
+            .candidates
+            .iter()
+            .map(|c| crate::types::GenerateSelection {
+                id: c.id.clone(),
+                pattern: Some(c.guessed_pattern.clone()),
+            })
+            .collect();
+        generate_export(
+            &state,
+            GenerateRequest {
+                origin: None,
+                selected,
+                ignore_patterns: Vec::new(),
+                redact: false,
+            },
+        )
+        .await
+        .expect("generate");
+        assert!(!export_zip_bytes(&state).await.expect("zip").is_empty());
+    }
+
+    #[test]
+    fn delete_one_and_delete_all() {
+        let dir = temp_sessions_dir();
+        let id = seed_auth_bearer(&dir);
+        let store = SessionStore::at(&dir);
+        assert_eq!(sessions_snapshot_from(&store).unwrap().sessions.len(), 1);
+        delete_stored_session_from(&store, &id).unwrap();
+        assert!(sessions_snapshot_from(&store).unwrap().sessions.is_empty());
+
+        seed_auth_bearer(&dir);
+        assert_eq!(delete_all_stored_sessions_from(&store).unwrap(), 1);
+        assert!(sessions_snapshot_from(&store).unwrap().sessions.is_empty());
+        assert_eq!(delete_all_stored_sessions_from(&store).unwrap(), 0);
     }
 
     #[tokio::test(flavor = "multi_thread")]
