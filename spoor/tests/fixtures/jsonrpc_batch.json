@@ -1,0 +1,18 @@
+[
+  {
+    "id": "batch-1",
+    "url": "https://api.example.test/jsonrpc",
+    "method": "POST",
+    "request_headers": {
+      "content-type": "application/json"
+    },
+    "request_body": "[{\"jsonrpc\":\"2.0\",\"method\":\"Alpha\",\"params\":{},\"id\":1},{\"jsonrpc\":\"2.0\",\"method\":\"Beta\",\"params\":{},\"id\":2}]",
+    "status": 200,
+    "response_headers": {
+      "content-type": "application/json"
+    },
+    "response_body": "[{\"jsonrpc\":\"2.0\",\"result\":{},\"id\":1},{\"jsonrpc\":\"2.0\",\"result\":{},\"id\":2}]",
+    "resource_type": "Fetch",
+    "sequence": 1
+  }
+]

@@ -13,11 +13,14 @@ pub fn from_classified(classified: &[ClassifiedEntry]) -> HashSet<String> {
         }
         let origin = &item.entry.origin;
         match item.protocol {
-            Protocol::Graphql => {
+            Protocol::Graphql
+            | Protocol::JsonRpc
+            | Protocol::WebSocket
+            | Protocol::GrpcWeb
+            | Protocol::Protobuf => {
                 *scores.entry(origin.clone()).or_insert(0) += 10;
             }
-            // Any classified REST counts — LLM-tagged traffic may not re-pass looks_like_rest.
-            Protocol::Rest => {
+            Protocol::Rest | Protocol::Form => {
                 *scores.entry(origin.clone()).or_insert(0) += 5;
             }
             _ => {}
@@ -30,4 +33,3 @@ pub fn from_classified(classified: &[ClassifiedEntry]) -> HashSet<String> {
         .map(|(origin, _)| origin)
         .collect()
 }
-

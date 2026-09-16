@@ -1,0 +1,15 @@
+{
+  "id": "fixture-auth-bearer",
+  "started_at": "2026-01-15T12:00:00Z",
+  "ended_at": "2026-01-15T12:01:00Z",
+  "pages": [
+    {
+      "url": "https://app.example.test/",
+      "domain": "example.test"
+    }
+  ],
+  "flows_capped": false,
+  "flow_count": 3,
+  "spoor_version": "0.4.0",
+  "gzipped": false
+}

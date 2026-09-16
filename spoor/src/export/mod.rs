@@ -1,19 +1,20 @@
 pub mod auth;
-pub mod brief;
 pub mod example_pick;
 pub mod facets;
-pub mod graphql;
+pub mod observations;
+pub mod pack;
 pub mod query_params;
+pub mod session;
 pub mod trim;
 
-use std::collections::{BTreeMap, HashSet};
 use std::io::Write;
 
-use zip::write::SimpleFileOptions;
 use zip::ZipWriter;
+use zip::write::SimpleFileOptions;
 
-use crate::classify::ClassifiedEntry;
-use crate::types::{Candidate, ExportBundle, GenerateRequest};
+use crate::capture::CaptureRecord;
+use crate::classify::{ClassifiedEntry, CoverageReport};
+use crate::types::{BrowsingPage, Candidate, ExportBundle, GenerateRequest};
 
 pub struct GenerateResult {
     pub bundle: ExportBundle,
@@ -25,69 +26,32 @@ pub fn generate_bundle(
     candidates: &[Candidate],
     req: &GenerateRequest,
 ) -> anyhow::Result<GenerateResult> {
-    let redact = req.redact;
-    let mut zip_files: Vec<(String, String)> = Vec::new();
+    generate_bundle_with_coverage(
+        classified,
+        candidates,
+        req,
+        &[],
+        &CoverageReport::default(),
+        &[],
+    )
+}
 
-    let mut rest_by_origin: BTreeMap<String, Vec<String>> = BTreeMap::new();
-    let mut gql_by_origin: BTreeMap<String, Vec<String>> = BTreeMap::new();
-    let mut origins_selected: HashSet<String> = HashSet::new();
+pub fn generate_bundle_with_coverage(
+    classified: &[ClassifiedEntry],
+    candidates: &[Candidate],
+    req: &GenerateRequest,
+    flows: &[CaptureRecord],
+    coverage: &CoverageReport,
+    page_urls: &[BrowsingPage],
+) -> anyhow::Result<GenerateResult> {
+    let zip_files =
+        pack::build_pack_files(classified, candidates, req, flows, coverage, page_urls)?;
 
+    let mut origins_selected = std::collections::HashSet::new();
     for sel in &req.selected {
-        let Some(cand) = candidates.iter().find(|c| c.id == sel.id) else {
-            continue;
-        };
-        if let Some(filter) = &req.origin {
-            if &cand.origin != filter {
-                continue;
-            }
+        if let Some(cand) = candidates.iter().find(|c| c.id == sel.id) {
+            origins_selected.insert(cand.origin.clone());
         }
-        let pattern = sel
-            .pattern
-            .clone()
-            .filter(|p| !p.is_empty())
-            .unwrap_or_else(|| cand.guessed_pattern.clone());
-
-        origins_selected.insert(cand.origin.clone());
-
-        if sel.id.starts_with("rest|") {
-            rest_by_origin
-                .entry(cand.origin.clone())
-                .or_default()
-                .push(pattern);
-        } else if sel.id.starts_with("graphql|") {
-            gql_by_origin
-                .entry(cand.origin.clone())
-                .or_default()
-                .push(pattern);
-        }
-    }
-
-    for (origin, patterns) in &rest_by_origin {
-        let brief = brief::generate_brief_yaml(
-            classified,
-            origin,
-            "rest",
-            patterns,
-            candidates,
-            redact,
-        )?;
-        zip_files.push((
-            format!("integration-brief-{}.yaml", host_slug(origin)),
-            brief,
-        ));
-    }
-
-    for (origin, ops) in &gql_by_origin {
-        let brief =
-            brief::generate_brief_yaml(classified, origin, "graphql", ops, candidates, redact)?;
-        zip_files.push((
-            format!("integration-brief-{}.yaml", host_slug(origin)),
-            brief,
-        ));
-    }
-
-    if zip_files.is_empty() {
-        anyhow::bail!("no export artifacts produced for selection");
     }
 
     let warnings = auth::session_auth_warnings(classified, &origins_selected);
@@ -97,13 +61,6 @@ pub fn generate_bundle(
         bundle: ExportBundle { zip_bytes },
         warnings,
     })
-}
-
-fn host_slug(origin: &str) -> String {
-    origin
-        .trim_start_matches("https://")
-        .trim_start_matches("http://")
-        .replace('.', "-")
 }
 
 fn build_zip(files: &[(String, String)]) -> anyhow::Result<Vec<u8>> {

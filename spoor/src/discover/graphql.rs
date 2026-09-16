@@ -8,7 +8,10 @@ pub fn discover(classified: &[ClassifiedEntry]) -> Vec<Candidate> {
     let mut counts: BTreeMap<(String, String), usize> = BTreeMap::new();
     let mut examples: BTreeMap<(String, String), ClassifiedEntry> = BTreeMap::new();
 
-    for item in classified.iter().filter(|c| c.protocol == Protocol::Graphql) {
+    for item in classified
+        .iter()
+        .filter(|c| c.protocol == Protocol::Graphql)
+    {
         let op = item
             .operation_name
             .clone()
@@ -35,10 +38,12 @@ pub fn discover(classified: &[ClassifiedEntry]) -> Vec<Candidate> {
                 guessed_pattern: op.clone(),
                 example: item.entry.flow.url.clone(),
                 host,
-                methods: vec![item.entry.flow.method.to_uppercase()],
+                methods: vec![item.entry.http_method().to_uppercase()],
                 confidence: confidence_str(item.confidence).to_string(),
                 origin,
                 request_count,
+                default_selected: false,
+                preference_ignored: false,
             })
         })
         .collect()

@@ -1,22 +1,38 @@
+use std::io::Read;
 use std::net::SocketAddr;
 use std::path::PathBuf;
-use std::time::Duration;
 
 use anyhow::Context;
 use axum::Router;
 use clap::Parser;
 use tokio::net::TcpListener;
 use tokio::signal;
-use tokio::sync::broadcast;
 
 use spoor::log;
 use spoor::types::AppState;
 use spoor::ui::router;
 
 #[derive(Parser)]
-#[command(name = "spoor", about = "Capture browser API traffic and export integration briefs")]
+#[command(
+    name = "spoor",
+    about = "Capture browser API traffic and export integration packs"
+)]
 struct Cli {
-    /// Launch the chromeless control panel and server
+    /// Credential brokering: `spoor auth` / `spoor call`.
+    #[command(subcommand)]
+    command: Option<spoor::cli::Command>,
+
+    /// Bind the headless HTTP API. Requires a bearer token (see --token).
+    /// The desktop app does not use this path — it talks to the library over IPC.
+    #[arg(long)]
+    serve: bool,
+
+    /// Bearer token for --serve. Generated and printed if omitted.
+    #[arg(long)]
+    token: Option<String>,
+
+    /// Deprecated: the Chromium control panel is gone. Use the Spoor desktop app,
+    /// or --serve for the headless HTTP API.
     #[arg(long)]
     app: bool,
 
@@ -28,8 +44,34 @@ struct Cli {
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
     let cli = Cli::parse();
-    if !cli.app {
-        eprintln!("Usage: spoor --app [--verbose]");
+
+    // Brokering commands are self-contained: no server, no browser unless the
+    // subcommand opens one itself.
+    if let Some(command) = cli.command {
+        init_tracing(cli.verbose);
+        log::init(cli.verbose);
+        load_env();
+        return spoor::cli::run(command).await;
+    }
+
+    if cli.app && !cli.serve {
+        eprintln!(
+            "The Chromium control panel (--app) has been removed.\n\
+             \n\
+             Desktop UI:  cargo tauri dev   (from spoor-app/)\n\
+             Headless API: spoor --serve [--token TOKEN] [--verbose]\n\
+             \n\
+             --serve binds 127.0.0.1 only and requires a bearer token on every request."
+        );
+        std::process::exit(2);
+    }
+    if !cli.serve {
+        eprintln!(
+            "Usage: spoor --serve [--token TOKEN] [--verbose]\n\
+             \n\
+             The control panel is the Spoor desktop app (cargo tauri dev / Spoor.app).\n\
+             --serve is the opt-in headless HTTP API for agents. It does not start a UI."
+        );
         std::process::exit(1);
     }
 
@@ -37,30 +79,34 @@ async fn main() -> anyhow::Result<()> {
     log::init(cli.verbose);
     load_env();
 
+    let token = match cli.token.filter(|t| !t.trim().is_empty()) {
+        Some(t) => t,
+        None => {
+            let generated = generate_bearer_token()?;
+            log::info(format!(
+                "generated bearer token (Authorization: Bearer {generated})"
+            ));
+            generated
+        }
+    };
+
     let port: u16 = std::env::var("SPOOR_PORT")
         .ok()
         .and_then(|p| p.parse().ok())
         .unwrap_or(3000);
 
     let chromium = spoor::browser_util::ensure_chromium().await?;
-    let state = AppState::new(chromium.clone());
-    let app: Router = router(state);
+    let state = AppState::new(chromium);
+    let app: Router = router(state, token);
 
     let addr = SocketAddr::from(([127, 0, 0, 1], port));
     let listener = TcpListener::bind(addr)
         .await
         .with_context(|| format!("bind {addr}"))?;
 
-    let panel_url = format!("http://127.0.0.1:{port}/");
-    log::info(&format!("control panel at {panel_url}"));
-    let (shutdown_tx, _) = broadcast::channel::<()>(1);
-    let panel_shutdown = shutdown_tx.subscribe();
-    let panel_exec = chromium;
-    let panel_url_spawn = panel_url.clone();
-    tokio::spawn(async move {
-        tokio::time::sleep(Duration::from_millis(400)).await;
-        spoor::browser_util::run_panel_browser(panel_exec, panel_url_spawn, panel_shutdown).await;
-    });
+    log::info(format!(
+        "headless API at http://127.0.0.1:{port}/ (Authorization: Bearer required)"
+    ));
     if cli.verbose {
         log::info("press Ctrl+C to quit");
     } else {
@@ -68,14 +114,42 @@ async fn main() -> anyhow::Result<()> {
     }
 
     axum::serve(listener, app)
-        .with_graceful_shutdown(async move {
+        .with_graceful_shutdown(async {
             shutdown_signal().await;
-            let _ = shutdown_tx.send(());
         })
         .await
         .context("server error")?;
 
     Ok(())
+}
+
+fn generate_bearer_token() -> anyhow::Result<String> {
+    let mut bytes = [0u8; 32];
+    fill_random(&mut bytes)?;
+    Ok(bytes.iter().map(|b| format!("{b:02x}")).collect())
+}
+
+fn fill_random(buf: &mut [u8]) -> anyhow::Result<()> {
+    #[cfg(unix)]
+    {
+        std::fs::File::open("/dev/urandom")
+            .context("open /dev/urandom")?
+            .read_exact(buf)
+            .context("read /dev/urandom")?;
+        Ok(())
+    }
+    #[cfg(not(unix))]
+    {
+        use std::hash::{Hash, Hasher};
+        let mut hasher = std::collections::hash_map::DefaultHasher::new();
+        std::process::id().hash(&mut hasher);
+        std::time::SystemTime::now().hash(&mut hasher);
+        let n = hasher.finish();
+        for (i, b) in buf.iter_mut().enumerate() {
+            *b = n.rotate_left((i as u32 * 7) % 64).to_le_bytes()[i % 8];
+        }
+        Ok(())
+    }
 }
 
 fn init_tracing(verbose: bool) {

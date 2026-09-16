@@ -39,59 +39,58 @@ pub fn discover(classified: &[ClassifiedEntry]) -> Vec<Candidate> {
             if !is_actionable_template(&template) {
                 continue;
             }
+            // One candidate per HTTP method so examples never mix GET/POST bodies.
             let methods: BTreeSet<String> = classified
                 .iter()
                 .filter(|c| c.protocol == Protocol::Rest && c.entry.origin == origin)
-                .filter(|c| path_matches_template(&c.entry.path, &template))
-                .map(|c| c.entry.flow.method.to_uppercase())
+                .filter(|c| path::path_matches_template(&c.entry.path, &template))
+                .map(|c| c.entry.http_method().to_uppercase())
+                .filter(|m| !m.is_empty())
                 .collect();
 
-            if methods.is_empty() {
-                continue;
+            for method in methods {
+                let matching: Vec<&ClassifiedEntry> = classified
+                    .iter()
+                    .filter(|c| {
+                        c.protocol == Protocol::Rest
+                            && c.entry.origin == origin
+                            && c.entry.http_method().eq_ignore_ascii_case(&method)
+                            && path::path_matches_template(&c.entry.path, &template)
+                    })
+                    .collect();
+                if matching.is_empty() {
+                    continue;
+                }
+
+                let example_entry = matching
+                    .iter()
+                    .max_by_key(|c| example_richness(c))
+                    .copied()
+                    .unwrap_or(matching[0]);
+
+                let id = format!("rest|{origin}|{method}|{template}");
+                candidates.push(Candidate {
+                    id,
+                    label: format!("{method} {template}"),
+                    protocol: protocol_str(Protocol::Rest).to_string(),
+                    guessed_pattern: template.clone(),
+                    example: format!(
+                        "{} {}",
+                        example_entry.entry.http_method().to_uppercase(),
+                        example_entry.entry.flow.url
+                    ),
+                    host: origin
+                        .trim_start_matches("https://")
+                        .trim_start_matches("http://")
+                        .to_string(),
+                    methods: vec![method],
+                    confidence: confidence_str(example_entry.confidence).to_string(),
+                    origin: origin.clone(),
+                    request_count: matching.len(),
+                    default_selected: false,
+                    preference_ignored: false,
+                });
             }
-
-            let example_entry = classified
-                .iter()
-                .find(|c| {
-                    c.protocol == Protocol::Rest
-                        && c.entry.origin == origin
-                        && path_matches_template(&c.entry.path, &template)
-                })
-                .cloned();
-
-            let Some(example_entry) = example_entry else {
-                continue;
-            };
-
-            let method_list: Vec<String> = methods.into_iter().collect();
-            let primary_method = method_list[0].clone();
-            let id = format!("rest|{origin}|{primary_method}|{template}");
-            let conf = example_entry.confidence;
-            let request_count = classified
-                .iter()
-                .filter(|c| c.protocol == Protocol::Rest && c.entry.origin == origin)
-                .filter(|c| path_matches_template(&c.entry.path, &template))
-                .count();
-
-            candidates.push(Candidate {
-                id,
-                label: format!("{primary_method} {template}"),
-                protocol: protocol_str(Protocol::Rest).to_string(),
-                guessed_pattern: template,
-                example: format!(
-                    "{} {}",
-                    example_entry.entry.flow.method.to_uppercase(),
-                    example_entry.entry.flow.url
-                ),
-                host: origin
-                    .trim_start_matches("https://")
-                    .trim_start_matches("http://")
-                    .to_string(),
-                methods: method_list,
-                confidence: confidence_str(conf).to_string(),
-                origin: origin.clone(),
-                request_count,
-            });
         }
     }
 
@@ -124,43 +123,34 @@ fn is_actionable_template(template: &str) -> bool {
     true
 }
 
-fn path_matches_template(path: &str, template: &str) -> bool {
-    if path == template {
-        return true;
+fn example_richness(entry: &ClassifiedEntry) -> usize {
+    let mut score = entry.entry.flow.url.len();
+    if let Some(b) = entry.entry.text_request() {
+        score += b.len().min(50_000);
     }
-    let path_segs: Vec<&str> = path.trim_matches('/').split('/').collect();
-    let tmpl_segs: Vec<&str> = template.trim_matches('/').split('/').collect();
-    if path_segs.len() != tmpl_segs.len() {
-        return false;
+    if let Some(b) = entry.entry.text_response() {
+        score += 1_000 + b.len().min(50_000);
     }
-    path_segs
-        .iter()
-        .zip(tmpl_segs.iter())
-        .all(|(p, t)| {
-            if t.starts_with('{') && t.ends_with('}') {
-                !p.is_empty()
-            } else {
-                p == t
-            }
-        })
+    score
 }
 
 #[cfg(test)]
 mod tests {
     use std::collections::HashMap;
 
+    use crate::capture::{Body, CaptureRecord, Transport};
     use crate::classify::{ClassifiedEntry, Confidence, Protocol};
     use crate::ir::TrafficEntry;
-    use crate::types::CapturedFlow;
 
     fn microservice_entry(path: &str, method: &str, body: &str) -> ClassifiedEntry {
         const ORIGIN: &str = "https://portal.example.test";
         ClassifiedEntry {
             entry: TrafficEntry {
-                flow: CapturedFlow {
+                flow: CaptureRecord {
                     id: "1".into(),
+                    transport: Transport::Http,
                     url: format!("{ORIGIN}{path}"),
-                    method: method.into(),
+                    method: Some(method.into()),
                     request_headers: HashMap::new(),
                     request_body: None,
                     status: Some(200),
@@ -168,8 +158,13 @@ mod tests {
                         "content-type".into(),
                         "application/json".into(),
                     )])),
-                    response_body: Some(body.into()),
+                    response_body: Some(Body::text(body)),
                     resource_type: Some("None".into()),
+                    sequence: 0,
+                    timestamp_ms: None,
+                    ws_request_id: None,
+                    ws_opcode: None,
+                    direction: None,
                 },
                 origin: ORIGIN.into(),
                 path: path.into(),
@@ -205,6 +200,24 @@ mod tests {
             !candidates.is_empty(),
             "expected microservice REST candidates, got none"
         );
-        assert!(candidates.iter().any(|c| c.guessed_pattern.contains("_search")));
+        assert!(
+            candidates
+                .iter()
+                .any(|c| c.guessed_pattern.contains("_search"))
+        );
+        assert!(
+            candidates.iter().any(|c| {
+                c.methods == vec!["GET".to_string()]
+                    && c.guessed_pattern.contains("{id}")
+                    && c.example.contains("GET")
+            }),
+            "GET {{id}} should not use POST example: {candidates:?}"
+        );
+        assert!(
+            !candidates
+                .iter()
+                .any(|c| { c.guessed_pattern.contains("{id}") && c.example.contains("_search") }),
+            "{{id}} must not pick _search example"
+        );
     }
 }

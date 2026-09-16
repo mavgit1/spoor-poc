@@ -1,0 +1,18 @@
+[
+  {
+    "id": "form-1",
+    "url": "https://api.example.test/login",
+    "method": "POST",
+    "request_headers": {
+      "content-type": "application/x-www-form-urlencoded"
+    },
+    "request_body": "user=alice&password=secret",
+    "status": 200,
+    "response_headers": {
+      "content-type": "text/html"
+    },
+    "response_body": "ok",
+    "resource_type": "Document",
+    "sequence": 1
+  }
+]
