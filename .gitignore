@@ -27,3 +27,6 @@ spoor-app/dist/
 
 # macOS
 .DS_Store
+
+# Local site scripts, exports and backups (may contain account data)
+local/
