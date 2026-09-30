@@ -9,11 +9,11 @@ use std::sync::atomic::{AtomicBool, AtomicU64};
 use std::time::Duration;
 
 use anyhow::Result;
-use chromiumoxide::Page;
 use chromiumoxide::cdp::browser_protocol::network::EnableParams;
 use chromiumoxide::cdp::browser_protocol::target::{
     EventAttachedToTarget, EventTargetCreated, TargetId,
 };
+use chromiumoxide::{Browser, Page};
 use futures::StreamExt;
 use tokio::sync::{Mutex, RwLock, mpsc};
 use tokio::task::JoinSet;
@@ -24,7 +24,7 @@ pub use model::{
 };
 
 use crate::log;
-use crate::types::{BrowserSession, BrowsingPage};
+use crate::session::BrowsingPage;
 
 const DEFAULT_MAX_FLOWS: usize = 10_000;
 
@@ -80,67 +80,23 @@ async fn capture_one_page(
     }
 }
 
-/// Upper bound on one `get_page` CDP round-trip.
-///
-/// `stop_handler` needs this same mutex to close the browser, and `Browser::close`
-/// takes `&mut self` so the lock cannot be avoided. Holding it across an unbounded
-/// await would hang Stop if CDP stalls.
-const GET_PAGE_TIMEOUT: Duration = Duration::from_millis(500);
-
-async fn resolve_page(
-    session: &Mutex<Option<BrowserSession>>,
-    target_id: TargetId,
-) -> Option<Page> {
+async fn resolve_page(browser: &Browser, target_id: TargetId) -> Option<Page> {
     for _ in 0..40 {
-        {
-            let guard = session.lock().await;
-            // Session taken by stop_handler — the browser is going away, stop retrying.
-            let s = guard.as_ref()?;
-            match tokio::time::timeout(GET_PAGE_TIMEOUT, s.browser.get_page(target_id.clone()))
-                .await
-            {
-                Ok(Ok(page)) => return Some(page),
-                Ok(Err(_)) => {}
-                Err(_) => log::debug(format!(
-                    "capture: get_page timed out for target {}",
-                    target_id.inner()
-                )),
-            }
+        if let Ok(page) = browser.get_page(target_id.clone()).await {
+            return Some(page);
         }
         tokio::time::sleep(Duration::from_millis(25)).await;
     }
     None
 }
 
-async fn wait_for_session(session: &Mutex<Option<BrowserSession>>) -> bool {
-    for _ in 0..100 {
-        if session.lock().await.is_some() {
-            return true;
-        }
-        tokio::time::sleep(Duration::from_millis(10)).await;
-    }
-    false
-}
-
 async fn watch_new_targets(
-    session: Arc<Mutex<Option<BrowserSession>>>,
+    browser: Arc<Browser>,
     page_tx: mpsc::UnboundedSender<Arc<Page>>,
 ) -> Result<()> {
-    if !wait_for_session(&session).await {
-        log::debug("capture: session not ready — watching only the initial tab");
-        return Ok(());
-    }
-
-    let (mut created, mut attached, existing) = {
-        let guard = session.lock().await;
-        let Some(s) = guard.as_ref() else {
-            return Ok(());
-        };
-        let created = s.browser.event_listener::<EventTargetCreated>().await?;
-        let attached = s.browser.event_listener::<EventAttachedToTarget>().await?;
-        let existing = s.browser.pages().await.unwrap_or_default();
-        (created, attached, existing)
-    };
+    let mut created = browser.event_listener::<EventTargetCreated>().await?;
+    let mut attached = browser.event_listener::<EventAttachedToTarget>().await?;
+    let existing = browser.pages().await.unwrap_or_default();
 
     for page in existing {
         if page_tx.send(Arc::new(page)).is_err() {
@@ -163,7 +119,7 @@ async fn watch_new_targets(
                             continue;
                         }
                         let id = ev.target_info.target_id.clone();
-                        if let Some(page) = resolve_page(&session, id).await {
+                        if let Some(page) = resolve_page(&browser, id).await {
                             log::debug(format!(
                                 "capture: attached to new {} target {}",
                                 ev.target_info.r#type,
@@ -184,7 +140,7 @@ async fn watch_new_targets(
                             continue;
                         }
                         let id = ev.target_info.target_id.clone();
-                        if let Some(page) = resolve_page(&session, id).await {
+                        if let Some(page) = resolve_page(&browser, id).await {
                             log::debug(format!(
                                 "capture: session attached to {} target {}",
                                 ev.target_info.r#type,
@@ -202,12 +158,13 @@ async fn watch_new_targets(
     Ok(())
 }
 
+/// Capture every tab of `browser` — the ones open now and any opened later —
+/// until the task is aborted or the browser goes away.
 pub async fn capture(
-    page: Arc<Page>,
+    browser: Arc<Browser>,
     flows: Arc<RwLock<Vec<CaptureRecord>>>,
     flows_capped: Arc<AtomicBool>,
     page_urls: Arc<RwLock<Vec<BrowsingPage>>>,
-    session: Arc<Mutex<Option<BrowserSession>>>,
 ) -> Result<()> {
     let max_flows = max_flows_limit();
     let sequence = Arc::new(AtomicU64::new(0));
@@ -215,16 +172,13 @@ pub async fn capture(
     let mut tasks: JoinSet<()> = JoinSet::new();
 
     let (page_tx, mut page_rx) = mpsc::unbounded_channel();
-    let _ = page_tx.send(page);
-
-    let watch_tx = page_tx.clone();
-    let watch_session = Arc::clone(&session);
-    let watch = tokio::spawn(async move {
-        if let Err(e) = watch_new_targets(watch_session, watch_tx).await {
+    // The watcher lives in the JoinSet so aborting `capture` tears down every
+    // listener with it — a recording stops without closing the browser.
+    tasks.spawn(async move {
+        if let Err(e) = watch_new_targets(browser, page_tx).await {
             log::debug(format!("capture/targets ended: {e:#}"));
         }
     });
-    drop(page_tx);
 
     while let Some(page) = page_rx.recv().await {
         if !mark_seen(&seen, page.target_id()).await {
@@ -240,7 +194,6 @@ pub async fn capture(
     }
 
     while tasks.join_next().await.is_some() {}
-    let _ = watch.await;
 
     let count = flows.read().await.len();
     log::info(format!("capture loop ended with {count} flows stored"));

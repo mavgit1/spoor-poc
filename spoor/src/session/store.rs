@@ -24,7 +24,14 @@ use serde::{Deserialize, Serialize};
 use crate::cache_dir::sessions_dir;
 use crate::capture::CaptureRecord;
 use crate::log;
-use crate::types::BrowsingPage;
+
+/// Top-level page the recording browser navigated to (main frame only).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct BrowsingPage {
+    pub url: String,
+    /// Registrable domain from CDP when available (e.g. `deepl.com`).
+    pub domain: String,
+}
 
 /// Default number of sessions to keep on disk.
 pub const DEFAULT_KEEP: usize = 20;
@@ -38,6 +45,9 @@ const FLOWS_GZ_FILE: &str = "flows.jsonl.gz";
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SessionMeta {
     pub id: String,
+    /// Site the recording was made on (`spoor record <site>`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub site: Option<String>,
     pub started_at: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub ended_at: Option<String>,
@@ -116,6 +126,7 @@ impl SessionStore {
             .with_context(|| format!("create {}", flows_path.display()))?;
         let meta = SessionMeta {
             id: id.to_string(),
+            site: None,
             started_at: utc_now_rfc3339(),
             ended_at: None,
             pages: Vec::new(),
@@ -232,6 +243,11 @@ impl SessionWriter {
         Ok(())
     }
 
+    pub fn set_site(&mut self, site: &str) -> Result<()> {
+        self.meta.site = Some(site.to_string());
+        write_meta_atomic(&self.dir.join(META_FILE), &self.meta)
+    }
+
     pub fn update_snapshot(&mut self, pages: Vec<BrowsingPage>, flows_capped: bool) -> Result<()> {
         self.meta.pages = pages;
         self.meta.flows_capped = flows_capped;
@@ -269,7 +285,7 @@ impl SessionWriter {
     }
 }
 
-/// Load a stored session directory, a jsonl/jsonl.gz file, a dump `.json.gz`,
+/// Load a stored session directory, a jsonl/jsonl.gz file,
 /// a JSON array of flows, or a session id under the default store.
 pub fn load_source(spec: &str) -> Result<LoadedSession> {
     let path = Path::new(spec);
@@ -294,6 +310,7 @@ pub fn load_session_dir(dir: &Path) -> Result<LoadedSession> {
         load_meta(&meta_path)?
     } else {
         SessionMeta {
+            site: None,
             id: dir
                 .file_name()
                 .map(|s| s.to_string_lossy().into_owned())
@@ -338,21 +355,12 @@ fn load_file(path: &Path) -> Result<LoadedSession> {
         .unwrap_or_else(|| "file".into());
 
     if looks_like_gzip(&bytes) || path_ends_with_any(path, &[".jsonl.gz", ".json.gz", ".gz"]) {
-        // Dump objects are a single JSON value — try that before jsonl so a
-        // one-line `{"flows":[...]}` is not skipped as a malformed record.
-        if let Ok((flows, capped)) = crate::dump::load_capture_dump(&bytes) {
-            return Ok(file_session(name, flows, capped));
-        }
         let raw = maybe_gunzip(&bytes)?;
         if let Ok(flows) = parse_json_array(&raw) {
             return Ok(file_session(name, flows, false));
         }
-        let flows = parse_jsonl_bytes(&raw).with_context(|| {
-            format!(
-                "not jsonl.gz, capture dump, or JSON array: {}",
-                path.display()
-            )
-        })?;
+        let flows = parse_jsonl_bytes(&raw)
+            .with_context(|| format!("not jsonl.gz or a JSON array: {}", path.display()))?;
         return Ok(file_session(name, flows, false));
     }
 
@@ -361,16 +369,13 @@ fn load_file(path: &Path) -> Result<LoadedSession> {
         return Ok(file_session(name, flows, false));
     }
 
-    if let Ok((flows, capped)) = crate::dump::load_capture_dump(&bytes) {
-        return Ok(file_session(name, flows, capped));
-    }
     if let Ok(flows) = parse_json_array(&bytes) {
         return Ok(file_session(name, flows, false));
     }
 
     let flows = parse_jsonl_bytes(&bytes).with_context(|| {
         format!(
-            "unrecognised capture file {} (tried session jsonl, dump, JSON array)",
+            "unrecognised capture file {} (tried session jsonl, JSON array)",
             path.display()
         )
     })?;
@@ -382,6 +387,7 @@ fn file_session(name: String, flows: Vec<CaptureRecord>, flows_capped: bool) -> 
     LoadedSession {
         meta: SessionMeta {
             id: name,
+            site: None,
             started_at: String::new(),
             ended_at: None,
             pages: Vec::new(),

@@ -38,7 +38,7 @@ fn isolation_chrome_args() -> Vec<String> {
     ]
 }
 
-/// Recording-browser argv Spoor controls (not the crate-injected
+/// Site-browser argv Spoor controls (not the crate-injected
 /// `--remote-debugging-port`, `--user-data-dir`, `--window-size`,
 /// `--disable-extensions`).
 fn recording_chrome_args(disable_dev_shm: bool) -> Vec<String> {
@@ -83,7 +83,7 @@ fn needs_disable_dev_shm() -> bool {
 }
 
 fn log_recording_argv(args: &[String], profile: &Path) {
-    log::debug("recording Chrome argv:");
+    log::debug("site Chrome argv:");
     for arg in args {
         log::debug(format!("  {arg}"));
     }
@@ -112,39 +112,6 @@ fn apply_isolation(builder: BrowserConfigBuilder, profile_dir: PathBuf) -> Brows
             .hide(),
         &isolation_chrome_args(),
     )
-}
-
-/// Isolated Chrome/Chromium profile used for recording. Persists cookies,
-/// history, and challenge cookies (`cf_clearance`, etc.) across sessions.
-pub fn recording_profile_dir() -> PathBuf {
-    cache_dir().join("profile-record")
-}
-
-/// Delete the recording profile so the next session starts logged-out / clean.
-/// Refuses if a browser currently has the profile open. Persistence is the
-/// default — nothing calls this automatically.
-pub fn reset_recording_profile() -> Result<()> {
-    reset_profile_dir(&recording_profile_dir())
-}
-
-fn reset_profile_dir(profile: &Path) -> Result<()> {
-    if profile_in_use(profile) {
-        anyhow::bail!(
-            "recording profile is in use at {}; close the browser first",
-            profile.display()
-        );
-    }
-    if profile.exists() {
-        std::fs::remove_dir_all(profile)
-            .with_context(|| format!("remove recording profile {}", profile.display()))?;
-        log::info(format!("cleared recording profile {}", profile.display()));
-    } else {
-        log::info(format!(
-            "recording profile already empty ({})",
-            profile.display()
-        ));
-    }
-    Ok(())
 }
 
 fn profile_in_use(profile: &Path) -> bool {
@@ -182,132 +149,49 @@ pub async fn cleanup_stale_profile_lock(profile: &Path) {
     }
 }
 
-/// Prefer a real local Chrome so the recording browser is not trivially
-/// fingerprinted as Chromium-for-Testing. Fetched Chromium is last resort.
+/// The browser every site runs in: one pinned Chromium build, downloaded on
+/// first use, so behaviour is the same on every machine. The revision is the
+/// chromiumoxide fetcher's default, pinned by `Cargo.lock`.
 ///
-/// Priority: `SPOOR_CHROME` (if it is a file) → platform Chrome install →
-/// `BrowserFetcher` download.
+/// `SPOOR_CHROME=<path>` overrides it (e.g. a real Chrome install).
+///
+/// Anti-detection does not depend on the binary: the launch drops
+/// `--enable-automation` (no `navigator.webdriver`), adds
+/// `--disable-blink-features=AutomationControlled`, and runs headed.
 pub async fn ensure_chromium() -> Result<PathBuf> {
-    let env_override = std::env::var_os("SPOOR_CHROME").map(PathBuf::from);
-    if let Some(path) = env_override.as_ref()
-        && !path.is_file()
-    {
+    if let Some(path) = std::env::var_os("SPOOR_CHROME").map(PathBuf::from) {
+        if path.is_file() {
+            log::info(format!(
+                "using browser from SPOOR_CHROME: {}",
+                path.display()
+            ));
+            return Ok(path);
+        }
         log::warn(format!(
-            "SPOOR_CHROME is set but not a file ({}); looking for a local Chrome",
+            "SPOOR_CHROME is set but not a file ({}); using the pinned Chromium",
             path.display()
         ));
     }
-
-    if let Some(path) = pick_chrome_executable(env_override.as_deref(), &local_chrome_candidates())
-    {
-        let via_env = env_override.as_ref().is_some_and(|p| p == &path);
-        if via_env {
-            log::info(format!(
-                "using Chrome from SPOOR_CHROME: {}",
-                path.display()
-            ));
-        } else {
-            log::info(format!(
-                "using locally installed Chrome: {}",
-                path.display()
-            ));
-        }
-        log_profile_isolation();
-        return Ok(path);
-    }
-
-    log::warn(
-        "no local Chrome found; falling back to fetched Chromium — fingerprinting resistance is reduced",
-    );
     let executable = fetch_bundled_chromium().await?;
-    log::info(format!("using Spoor Chromium: {}", executable.display()));
-    log_profile_isolation();
+    log::debug(format!("using pinned Chromium: {}", executable.display()));
     Ok(executable)
 }
 
-fn log_profile_isolation() {
-    log::info(format!(
-        "browser data isolated under {} (not your system Chrome/Safari profiles)",
-        cache_dir().display()
-    ));
-}
-
-fn pick_chrome_executable(
-    env_override: Option<&Path>,
-    local_candidates: &[PathBuf],
-) -> Option<PathBuf> {
-    env_override
-        .filter(|path| path.is_file())
-        .map(Path::to_path_buf)
-        .or_else(|| local_candidates.iter().find(|p| p.is_file()).cloned())
-}
-
-#[cfg(target_os = "macos")]
-fn local_chrome_candidates() -> Vec<PathBuf> {
-    const REL: &[&str] = &[
-        "Google Chrome.app/Contents/MacOS/Google Chrome",
-        "Google Chrome Beta.app/Contents/MacOS/Google Chrome Beta",
-        "Google Chrome Dev.app/Contents/MacOS/Google Chrome Dev",
-        "Google Chrome Canary.app/Contents/MacOS/Google Chrome Canary",
-    ];
-    let mut roots = vec![PathBuf::from("/Applications")];
-    if let Some(home) = dirs::home_dir() {
-        roots.push(home.join("Applications"));
+/// Where the pinned Chromium is unpacked. Deliberately *not* under
+/// `SPOOR_CACHE_DIR`: that isolates state (profiles, recordings), and a test
+/// pointing it at a temp dir should not re-download a 150 MB browser.
+/// `SPOOR_CHROMIUM_DIR` overrides.
+fn chromium_dir() -> PathBuf {
+    if let Some(dir) = std::env::var_os("SPOOR_CHROMIUM_DIR").filter(|s| !s.is_empty()) {
+        return PathBuf::from(dir);
     }
-    let mut out = Vec::with_capacity(roots.len() * REL.len());
-    for root in &roots {
-        for rel in REL {
-            out.push(root.join(rel));
-        }
-    }
-    out
-}
-
-#[cfg(all(unix, not(target_os = "macos")))]
-fn local_chrome_candidates() -> Vec<PathBuf> {
-    const NAMES: &[&str] = &[
-        "google-chrome",
-        "google-chrome-stable",
-        "chromium",
-        "chromium-browser",
-    ];
-    let dirs: Vec<PathBuf> = std::env::var_os("PATH")
-        .map(|p| std::env::split_paths(&p).collect())
-        .unwrap_or_default();
-    let mut found = Vec::new();
-    for name in NAMES {
-        if let Some(path) = dirs.iter().map(|d| d.join(name)).find(|p| p.is_file()) {
-            found.push(path);
-        }
-    }
-    found
-}
-
-#[cfg(windows)]
-fn local_chrome_candidates() -> Vec<PathBuf> {
-    const REL: &[&str] = &[
-        r"Google\Chrome\Application\chrome.exe",
-        r"Google\Chrome Beta\Application\chrome.exe",
-        r"Google\Chrome Dev\Application\chrome.exe",
-        r"Google\Chrome SxS\Application\chrome.exe",
-    ];
-    let mut roots = Vec::new();
-    for key in ["PROGRAMFILES", "PROGRAMFILES(X86)", "LOCALAPPDATA"] {
-        if let Some(v) = std::env::var_os(key) {
-            roots.push(PathBuf::from(v));
-        }
-    }
-    let mut out = Vec::new();
-    for root in &roots {
-        for rel in REL {
-            out.push(root.join(rel));
-        }
-    }
-    out
+    dirs::cache_dir()
+        .map(|d| d.join("spoor").join("chromium"))
+        .unwrap_or_else(|| cache_dir().join("chromium"))
 }
 
 async fn fetch_bundled_chromium() -> Result<PathBuf> {
-    let download_path = cache_dir().join("chromium");
+    let download_path = chromium_dir();
     tokio::fs::create_dir_all(&download_path)
         .await
         .with_context(|| format!("create {}", download_path.display()))?;
@@ -330,18 +214,13 @@ async fn fetch_bundled_chromium() -> Result<PathBuf> {
     Ok(info.executable_path)
 }
 
-/// Full-size headed browser for the user to browse the target site.
-pub fn recording_config(executable: &Path) -> Result<BrowserConfig> {
-    recording_config_with_profile(executable, recording_profile_dir())
-}
-
-/// Same launch hardening, explicit profile.
+/// Headed browser on a site's own persistent profile.
 ///
-/// Tests need this: Chromium holds a `SingletonLock` per profile, so two
-/// concurrent launches on one profile fail, and the shared recording profile
-/// holds the user's real logins and history — a test must never load or mutate
-/// it. Production always uses [`recording_profile_dir`].
-pub fn recording_config_with_profile(executable: &Path, profile: PathBuf) -> Result<BrowserConfig> {
+/// One profile per site ([`crate::cache_dir::profile_dir`]) is the whole
+/// session model: cookies, storage and "remember this device" persist there,
+/// and Chromium's per-profile `SingletonLock` means one process owns it.
+/// Tests pass a throwaway profile so they never touch real logins.
+pub fn site_browser_config(executable: &Path, profile: PathBuf) -> Result<BrowserConfig> {
     let disable_dev_shm = needs_disable_dev_shm();
     let args = recording_chrome_args(disable_dev_shm);
     log_recording_argv(&args, &profile);
@@ -452,101 +331,8 @@ mod tests {
     }
 
     #[test]
-    fn recording_config_builds_without_launching() {
-        recording_config(Path::new("/nonexistent/chrome")).expect("config should build");
-    }
-
-    #[test]
-    fn recording_profile_is_isolated_under_cache() {
-        let profile = recording_profile_dir();
-        assert_eq!(profile.file_name().unwrap(), "profile-record");
-        assert_eq!(profile.parent().unwrap(), cache_dir());
-        assert!(
-            !profile.to_string_lossy().contains("Google/Chrome")
-                && !profile
-                    .to_string_lossy()
-                    .contains("Library/Application Support/Google"),
-            "must not point at the user's default Chrome profile: {}",
-            profile.display()
-        );
-    }
-
-    fn temp_workspace(label: &str) -> PathBuf {
-        let dir = std::env::temp_dir().join(format!(
-            "spoor-browser-util-{label}-{}-{}",
-            std::process::id(),
-            std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .expect("clock")
-                .as_nanos()
-        ));
-        std::fs::create_dir_all(&dir).unwrap();
-        dir
-    }
-
-    #[test]
-    fn spoor_chrome_env_wins_over_local_candidates() {
-        let dir = temp_workspace("env-wins");
-        let env_bin = dir.join("spoor-chrome");
-        let local_bin = dir.join("Google Chrome");
-        std::fs::write(&env_bin, b"env").unwrap();
-        std::fs::write(&local_bin, b"local").unwrap();
-
-        let picked = pick_chrome_executable(Some(&env_bin), std::slice::from_ref(&local_bin));
-        assert_eq!(picked.as_deref(), Some(env_bin.as_path()));
-        let _ = std::fs::remove_dir_all(&dir);
-    }
-
-    #[test]
-    fn missing_spoor_chrome_falls_through_to_local() {
-        let dir = temp_workspace("env-missing");
-        let missing = dir.join("nope");
-        let local_bin = dir.join("chrome");
-        std::fs::write(&local_bin, b"local").unwrap();
-
-        let picked = pick_chrome_executable(Some(&missing), std::slice::from_ref(&local_bin));
-        assert_eq!(picked.as_deref(), Some(local_bin.as_path()));
-        let _ = std::fs::remove_dir_all(&dir);
-    }
-
-    #[test]
-    fn no_install_means_fetch_fallback() {
-        let dir = temp_workspace("none");
-        let missing_env = dir.join("missing-env");
-        let missing_local = dir.join("missing-local");
-        assert!(
-            pick_chrome_executable(Some(&missing_env), &[missing_local]).is_none(),
-            "none of the paths exist; caller should fetch Chromium"
-        );
-        let _ = std::fs::remove_dir_all(&dir);
-    }
-
-    #[test]
-    fn reset_profile_deletes_when_idle() {
-        let dir = temp_workspace("reset");
-        std::fs::create_dir_all(dir.join("Default")).unwrap();
-        std::fs::write(dir.join("Default").join("Cookies"), b"x").unwrap();
-        reset_profile_dir(&dir).unwrap();
-        assert!(!dir.exists());
-        reset_profile_dir(&dir).unwrap();
-    }
-
-    #[cfg(target_os = "macos")]
-    #[test]
-    fn macos_chrome_lookup_prefers_stable_then_channels() {
-        let candidates = local_chrome_candidates();
-        assert_eq!(
-            candidates[0],
-            PathBuf::from("/Applications/Google Chrome.app/Contents/MacOS/Google Chrome")
-        );
-        let names: Vec<String> = candidates
-            .iter()
-            .map(|p| p.file_name().unwrap().to_string_lossy().into_owned())
-            .collect();
-        let apps: Vec<&str> = names.iter().map(String::as_str).collect();
-        assert!(apps.contains(&"Google Chrome"));
-        assert!(apps.contains(&"Google Chrome Beta"));
-        assert!(apps.contains(&"Google Chrome Dev"));
-        assert!(apps.contains(&"Google Chrome Canary"));
+    fn site_config_builds_without_launching() {
+        site_browser_config(Path::new("/nonexistent/chrome"), std::env::temp_dir())
+            .expect("config should build");
     }
 }

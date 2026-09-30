@@ -22,8 +22,8 @@ use chromiumoxide::Browser;
 use chromiumoxide::cdp::browser_protocol::target::CreateTargetParams;
 use spoor::browser_util;
 use spoor::capture::{self, CaptureRecord};
-use spoor::types::{BrowserSession, BrowsingPage};
-use tokio::sync::{Mutex, RwLock};
+use spoor::session::BrowsingPage;
+use tokio::sync::RwLock;
 
 const INDEX_HTML: &str = r#"<!doctype html>
 <html><body><h1>spoor smoke</h1><script>
@@ -81,6 +81,20 @@ fn scratch_profile(tag: &str) -> std::path::PathBuf {
     dir
 }
 
+/// Close the browser; capture ends when its event streams do.
+async fn close(
+    browser: Arc<Browser>,
+    capture_task: tokio::task::JoinHandle<()>,
+    handler_task: tokio::task::JoinHandle<()>,
+) {
+    browser
+        .execute(chromiumoxide::cdp::browser_protocol::browser::CloseParams::default())
+        .await
+        .ok();
+    let _ = tokio::time::timeout(Duration::from_secs(5), capture_task).await;
+    let _ = tokio::time::timeout(Duration::from_secs(5), handler_task).await;
+}
+
 fn path_of(flow: &CaptureRecord) -> String {
     url::Url::parse(&flow.url)
         .map(|u| u.path().to_string())
@@ -101,41 +115,30 @@ async fn captures_redirects_bodies_and_second_target() {
         .await
         .expect("chromium available");
     let profile = scratch_profile("redirects");
-    let config = browser_util::recording_config_with_profile(&chromium, profile.clone())
-        .expect("recording config");
+    let config =
+        browser_util::site_browser_config(&chromium, profile.clone()).expect("recording config");
     let (browser, handler) = Browser::launch(config).await.expect("launch browser");
     let handler_task = browser_util::spawn_handler(handler, "smoke");
 
-    let page = Arc::new(
-        browser
-            .new_page("about:blank")
-            .await
-            .expect("open first tab"),
-    );
+    let browser = Arc::new(browser);
+    let page = browser
+        .new_page("about:blank")
+        .await
+        .expect("open first tab");
 
     let flows: Arc<RwLock<Vec<CaptureRecord>>> = Arc::new(RwLock::new(Vec::new()));
     let flows_capped = Arc::new(AtomicBool::new(false));
     let page_urls: Arc<RwLock<Vec<BrowsingPage>>> = Arc::new(RwLock::new(Vec::new()));
 
-    // Mirrors ui::start_handler: the session must be stored before capture runs,
-    // because capture watches it for newly created targets.
-    let session: Arc<Mutex<Option<BrowserSession>>> = Arc::new(Mutex::new(None));
-    *session.lock().await = Some(BrowserSession {
-        browser,
-        handler_task,
-        capture_task: tokio::spawn(async {}),
-    });
-
     let capture_task = tokio::spawn({
-        let (page, flows, flows_capped, page_urls, session) = (
-            Arc::clone(&page),
+        let (browser, flows, flows_capped, page_urls) = (
+            Arc::clone(&browser),
             Arc::clone(&flows),
             Arc::clone(&flows_capped),
             Arc::clone(&page_urls),
-            Arc::clone(&session),
         );
         async move {
-            let _ = capture::capture(page, flows, flows_capped, page_urls, session).await;
+            let _ = capture::capture(browser, flows, flows_capped, page_urls).await;
         }
     });
 
@@ -152,37 +155,24 @@ async fn captures_redirects_bodies_and_second_target() {
     // Second target: exercises the Target.targetCreated path that new tabs and
     // window.open popups both go through.
     //
-    // `Browser::new_page` waits for load, which needs the target to be resumed.
-    // Resume is driven by capture and must not require this lock, so create the
-    // target with a browser-level command that returns as soon as the id exists.
-    let popup_id = {
-        let guard = session.lock().await;
-        let browser = &guard.as_ref().expect("session present").browser;
-        browser
-            .execute(CreateTargetParams::new("about:blank"))
-            .await
-            .expect("open popup tab")
-            .result
-            .target_id
-    };
+    // A browser-level command that returns as soon as the target id exists.
+    let popup_id = browser
+        .execute(CreateTargetParams::new("about:blank"))
+        .await
+        .expect("open popup tab")
+        .result
+        .target_id;
     // Give capture time to attach before the target issues any request, so a
     // failure here means "never attached" rather than "attached too late".
     tokio::time::sleep(Duration::from_millis(1500)).await;
-    let popup = {
-        let guard = session.lock().await;
-        let browser = &guard.as_ref().expect("session present").browser;
-        browser.get_page(popup_id).await.expect("popup page")
-    };
+    let popup = browser.get_page(popup_id).await.expect("popup page");
     popup
         .goto(format!("{base}/popup"))
         .await
         .expect("navigate popup tab");
     tokio::time::sleep(Duration::from_millis(2000)).await;
 
-    let mut taken = session.lock().await.take().expect("session present");
-    taken.browser.close().await.ok();
-    let _ = capture_task.await;
-    let _ = taken.handler_task.await;
+    close(browser, capture_task, handler_task).await;
     let _ = std::fs::remove_dir_all(&profile);
 
     let flows = flows.read().await.clone();
@@ -252,59 +242,42 @@ async fn captures_first_request_of_a_self_navigating_target() {
         .await
         .expect("chromium available");
     let profile = scratch_profile("race");
-    let config = browser_util::recording_config_with_profile(&chromium, profile.clone())
-        .expect("recording config");
+    let config =
+        browser_util::site_browser_config(&chromium, profile.clone()).expect("recording config");
     let (browser, handler) = Browser::launch(config).await.expect("launch browser");
     let handler_task = browser_util::spawn_handler(handler, "smoke-race");
 
-    let page = Arc::new(
-        browser
-            .new_page("about:blank")
-            .await
-            .expect("open first tab"),
-    );
+    let browser = Arc::new(browser);
+    let _page = browser
+        .new_page("about:blank")
+        .await
+        .expect("open first tab");
+
     let flows: Arc<RwLock<Vec<CaptureRecord>>> = Arc::new(RwLock::new(Vec::new()));
     let flows_capped = Arc::new(AtomicBool::new(false));
     let page_urls: Arc<RwLock<Vec<BrowsingPage>>> = Arc::new(RwLock::new(Vec::new()));
 
-    let session: Arc<Mutex<Option<BrowserSession>>> = Arc::new(Mutex::new(None));
-    *session.lock().await = Some(BrowserSession {
-        browser,
-        handler_task,
-        capture_task: tokio::spawn(async {}),
-    });
-
     let capture_task = tokio::spawn({
-        let (page, flows, flows_capped, page_urls, session) = (
-            Arc::clone(&page),
+        let (browser, flows, flows_capped, page_urls) = (
+            Arc::clone(&browser),
             Arc::clone(&flows),
             Arc::clone(&flows_capped),
             Arc::clone(&page_urls),
-            Arc::clone(&session),
         );
         async move {
-            let _ = capture::capture(page, flows, flows_capped, page_urls, session).await;
+            let _ = capture::capture(browser, flows, flows_capped, page_urls).await;
         }
     });
     tokio::time::sleep(Duration::from_millis(500)).await;
 
     // No pause between creation and navigation — this is what a popup does.
-    // `CreateTarget` returns the id without waiting for load, so this lock is
-    // not held across resume (which would deadlock Stop / freeze the popup).
-    {
-        let guard = session.lock().await;
-        let browser = &guard.as_ref().expect("session present").browser;
-        browser
-            .execute(CreateTargetParams::new(format!("{base}/popup")))
-            .await
-            .expect("open popup tab");
-    }
+    browser
+        .execute(CreateTargetParams::new(format!("{base}/popup")))
+        .await
+        .expect("open popup tab");
     tokio::time::sleep(Duration::from_millis(2500)).await;
 
-    let mut taken = session.lock().await.take().expect("session present");
-    taken.browser.close().await.ok();
-    let _ = capture_task.await;
-    let _ = taken.handler_task.await;
+    close(browser, capture_task, handler_task).await;
     let _ = std::fs::remove_dir_all(&profile);
 
     let flows = flows.read().await.clone();

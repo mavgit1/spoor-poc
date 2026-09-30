@@ -7,7 +7,7 @@ use futures::StreamExt;
 use tokio::sync::RwLock;
 
 use crate::log;
-use crate::types::BrowsingPage;
+use crate::session::BrowsingPage;
 
 /// Track top-level (main-frame) navigations for session context / relations.
 pub async fn run(page: Arc<Page>, page_urls: Arc<RwLock<Vec<BrowsingPage>>>) -> Result<()> {
