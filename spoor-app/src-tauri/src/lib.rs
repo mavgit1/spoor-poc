@@ -1,113 +1,165 @@
-use std::path::PathBuf;
+//! Desktop shell for Spoor: a tray app and a small site manager.
+//!
+//! The app does not drive browsers itself. On launch it attaches to a running
+//! `spoor serve`, or runs one in-process, and every button is a call to that
+//! service — the same API the CLI and integrations use.
+
+use std::sync::Arc;
 use std::time::Duration;
 
 use serde::Serialize;
-use spoor::types::{AppState, FilterPreferenceRequest, GenerateRequest, GenerateSelection};
-use spoor::ui::{
-    candidates_snapshot, capture_dump_gzip, delete_all_stored_sessions, delete_stored_session,
-    export_zip_bytes, generate_export, load_stored_session, persist_filter_preference,
-    run_discover_session, sessions_snapshot, start_recording, status_snapshot, stop_recording,
-    CandidatesSnapshot, FilterOutcome, GenerateOutcome, SessionsSnapshot, StatusSnapshot,
-};
+use serde_json::{Value, json};
+use spoor::client::Client;
+use spoor::runtime::{RecordInfo, SiteInfo, SiteStatus};
+use spoor::session::{SessionStore, format_bytes};
+use spoor::site::{Site, Sites};
 use tauri::menu::{Menu, MenuItem};
 use tauri::tray::{MouseButton, TrayIconBuilder, TrayIconEvent};
-use tauri::{AppHandle, Emitter, Manager, State};
-use tauri_plugin_dialog::DialogExt;
+use tauri::{AppHandle, Manager, State};
+use tokio::sync::OnceCell;
 
 const TRAY_ID: &str = "main";
+const SERVE_START_TIMEOUT: Duration = Duration::from_secs(120);
 
-#[derive(Clone, Serialize)]
-struct DiscoverFinished {
-    ok: bool,
-    error: Option<String>,
-    origins: Vec<String>,
-    candidates: Vec<spoor::types::Candidate>,
+/// Connection to the session service, established once in the background.
+#[derive(Default)]
+struct Service {
+    client: OnceCell<Arc<Client>>,
 }
 
-fn load_env() {
-    let mut candidates = vec![
-        PathBuf::from(".env"),
-        PathBuf::from("../.env"),
-        PathBuf::from("../../.env"),
-    ];
-    if let Ok(exe) = std::env::current_exe() {
-        if let Some(dir) = exe.parent() {
-            candidates.push(dir.join(".env"));
-            if let Some(parent) = dir.parent() {
-                candidates.push(parent.join(".env"));
-            }
+impl Service {
+    async fn client(&self) -> Result<Arc<Client>, String> {
+        self.client
+            .get_or_try_init(connect_or_serve)
+            .await
+            .cloned()
+            .map_err(|e| format!("{e:#}"))
+    }
+}
+
+/// Attach to a running `spoor serve`, or start one inside this process.
+async fn connect_or_serve() -> anyhow::Result<Arc<Client>> {
+    if let Ok(client) = Client::connect(false).await {
+        spoor::log::info("attached to a running spoor serve");
+        return Ok(Arc::new(client));
+    }
+    tokio::spawn(async {
+        if let Err(e) = spoor::server::serve(spoor::server::DEFAULT_PORT, None).await {
+            spoor::log::error(format!("spoor serve failed: {e:#}"));
+        }
+    });
+    // First launch may download Chromium before the service answers.
+    let deadline = tokio::time::Instant::now() + SERVE_START_TIMEOUT;
+    loop {
+        tokio::time::sleep(Duration::from_millis(300)).await;
+        match Client::connect(false).await {
+            Ok(client) => return Ok(Arc::new(client)),
+            Err(e) if tokio::time::Instant::now() > deadline => return Err(e),
+            Err(_) => {}
         }
     }
-    for path in candidates {
-        if path.exists() {
-            let _ = dotenvy::from_path(&path);
-            break;
-        }
-    }
 }
 
-fn init_tracing() {
-    use tracing_subscriber::EnvFilter;
-    let filter = EnvFilter::try_from_default_env().unwrap_or_else(|_| {
-        EnvFilter::new("warn,spoor=info,chromiumoxide=error,tungstenite=error")
-    });
-    tracing_subscriber::fmt()
-        .with_env_filter(filter)
-        .with_target(false)
-        .try_init()
-        .ok();
+fn err(e: anyhow::Error) -> String {
+    format!("{e:#}")
 }
 
-async fn emit_status(app: &AppHandle, state: &AppState) {
-    let snap = status_snapshot(state).await;
-    let _ = app.emit("status", &snap);
-    if let Some(tray) = app.tray_by_id(TRAY_ID) {
-        let tooltip = if snap.recording {
-            format!("Spoor — recording · {} captured", snap.flow_count)
-        } else if snap.analyzing {
-            "Spoor — discovering APIs…".to_string()
-        } else {
-            format!("Spoor — {} captured", snap.flow_count)
-        };
-        let _ = tray.set_tooltip(Some(&tooltip));
-    }
-}
-
-async fn do_start(app: &AppHandle, state: &AppState) -> Result<(), String> {
-    start_recording(state).await.map_err(|e| e.to_string())?;
-    emit_status(app, state).await;
-    Ok(())
-}
-
-fn spawn_discover(app: AppHandle, state: AppState) {
-    tauri::async_runtime::spawn(async move {
-        let result = run_discover_session(&state).await;
-        let snap = candidates_snapshot(&state).await;
-        let payload = DiscoverFinished {
-            ok: result.is_ok(),
-            error: result.err().map(|e| e.to_string()),
-            origins: snap.origins,
-            candidates: snap.candidates,
-        };
-        let _ = app.emit("discover-finished", &payload);
-        emit_status(&app, &state).await;
-    });
-}
-
-async fn do_stop(app: &AppHandle, state: &AppState) -> Result<(), String> {
-    stop_recording(state).await.map_err(|e| e.to_string())?;
-    emit_status(app, state).await;
-    spawn_discover(app.clone(), state.clone());
-    Ok(())
-}
-
-async fn do_load_session(app: &AppHandle, state: &AppState, id: &str) -> Result<(), String> {
-    load_stored_session(state, id)
+async fn post<T: serde::de::DeserializeOwned>(service: &Service, path: &str) -> Result<T, String> {
+    service
+        .client()
+        .await?
+        .post(path, &json!({}))
         .await
-        .map_err(|e| e.to_string())?;
-    emit_status(app, state).await;
-    spawn_discover(app.clone(), state.clone());
-    Ok(())
+        .map_err(err)
+}
+
+#[derive(Serialize)]
+struct SessionRow {
+    id: String,
+    site: Option<String>,
+    started_at: String,
+    flows: usize,
+    size: String,
+    path: String,
+}
+
+#[tauri::command]
+async fn sites(service: State<'_, Service>) -> Result<Vec<SiteInfo>, String> {
+    service.client().await?.get("/sites").await.map_err(err)
+}
+
+#[tauri::command]
+async fn site_status(service: State<'_, Service>, site: String) -> Result<SiteStatus, String> {
+    let path = format!("/sites/{site}/status");
+    service.client().await?.get(&path).await.map_err(err)
+}
+
+#[tauri::command]
+async fn open_site(service: State<'_, Service>, site: String) -> Result<Value, String> {
+    post(&service, &format!("/sites/{site}/open")).await
+}
+
+#[tauri::command]
+async fn record_start(service: State<'_, Service>, site: String) -> Result<RecordInfo, String> {
+    post(&service, &format!("/sites/{site}/record/start")).await
+}
+
+#[tauri::command]
+async fn record_stop(service: State<'_, Service>, site: String) -> Result<RecordInfo, String> {
+    post(&service, &format!("/sites/{site}/record/stop")).await
+}
+
+#[tauri::command]
+async fn stop_site(service: State<'_, Service>, site: String) -> Result<Value, String> {
+    post(&service, &format!("/sites/{site}/stop")).await
+}
+
+#[tauri::command]
+async fn stop_all(service: State<'_, Service>) -> Result<Value, String> {
+    post(&service, "/stop").await
+}
+
+#[tauri::command]
+fn add_site(name: String, url: String, min_gap_ms: Option<u64>) -> Result<(), String> {
+    let mut sites = Sites::load().map_err(err)?;
+    // Keep an existing check script when re-adding a site from the app.
+    let check = sites.sites.get(&name).and_then(|s| s.check.clone());
+    sites
+        .add(
+            &name,
+            Site {
+                url,
+                check,
+                min_gap_ms,
+            },
+        )
+        .map_err(err)?;
+    sites.save().map_err(err)
+}
+
+#[tauri::command]
+fn remove_site(name: String) -> Result<(), String> {
+    let mut sites = Sites::load().map_err(err)?;
+    sites.remove(&name);
+    sites.save().map_err(err)
+}
+
+#[tauri::command]
+fn sessions() -> Result<Vec<SessionRow>, String> {
+    let rows = SessionStore::default_store()
+        .list()
+        .map_err(err)?
+        .into_iter()
+        .map(|s| SessionRow {
+            id: s.meta.id,
+            site: s.meta.site,
+            started_at: s.meta.started_at,
+            flows: s.meta.flow_count,
+            size: format_bytes(s.size_bytes),
+            path: s.path.display().to_string(),
+        })
+        .collect();
+    Ok(rows)
 }
 
 fn show_main(app: &AppHandle) {
@@ -118,191 +170,50 @@ fn show_main(app: &AppHandle) {
     }
 }
 
-async fn flow_watch(app: AppHandle, state: AppState) {
-    let mut last = usize::MAX;
-    loop {
-        tokio::time::sleep(Duration::from_millis(400)).await;
-        if !state.is_recording() {
-            continue;
+/// Close every site browser and the service, then exit.
+fn quit(app: &AppHandle) {
+    let app = app.clone();
+    tauri::async_runtime::spawn(async move {
+        if let Some(service) = app.try_state::<Service>()
+            && let Some(client) = service.client.get()
+        {
+            let _ = tokio::time::timeout(
+                Duration::from_secs(5),
+                client.post::<Value>("/shutdown", &json!({})),
+            )
+            .await;
+            // Let the service close its browsers before the process goes.
+            tokio::time::sleep(Duration::from_millis(800)).await;
         }
-        let n = state.flows.read().await.len();
-        if n == last {
-            continue;
-        }
-        last = n;
-        let _ = app.emit("flow-count", n);
-        emit_status(&app, &state).await;
-    }
-}
-
-fn save_via_dialog(
-    app: &AppHandle,
-    bytes: Vec<u8>,
-    title: &str,
-    file_name: &str,
-    filter_name: &str,
-    ext: &str,
-) -> Result<Option<String>, String> {
-    let picked = app
-        .dialog()
-        .file()
-        .set_title(title)
-        .set_file_name(file_name)
-        .add_filter(filter_name, &[ext])
-        .blocking_save_file();
-    let Some(file) = picked else {
-        return Ok(None);
-    };
-    let path = file.into_path().map_err(|e| e.to_string())?;
-    std::fs::write(&path, bytes).map_err(|e| e.to_string())?;
-    Ok(Some(path.display().to_string()))
-}
-
-#[tauri::command]
-async fn start(app: AppHandle, state: State<'_, AppState>) -> Result<StatusSnapshot, String> {
-    do_start(&app, &state).await?;
-    Ok(status_snapshot(&state).await)
-}
-
-#[tauri::command]
-async fn stop(app: AppHandle, state: State<'_, AppState>) -> Result<StatusSnapshot, String> {
-    do_stop(&app, &state).await?;
-    Ok(status_snapshot(&state).await)
-}
-
-#[tauri::command]
-async fn status(state: State<'_, AppState>) -> Result<StatusSnapshot, String> {
-    Ok(status_snapshot(&state).await)
-}
-
-#[tauri::command]
-async fn candidates(state: State<'_, AppState>) -> Result<CandidatesSnapshot, String> {
-    Ok(candidates_snapshot(&state).await)
-}
-
-#[tauri::command]
-async fn generate(
-    app: AppHandle,
-    state: State<'_, AppState>,
-    selected: Vec<GenerateSelection>,
-    redact: bool,
-) -> Result<GenerateOutcome, String> {
-    let req = GenerateRequest {
-        origin: None,
-        selected,
-        ignore_patterns: Vec::new(),
-        redact,
-    };
-    let outcome = generate_export(&state, req)
-        .await
-        .map_err(|e| e.to_string())?;
-    emit_status(&app, &state).await;
-    Ok(outcome)
-}
-
-#[tauri::command]
-async fn save_export(app: AppHandle, state: State<'_, AppState>) -> Result<Option<String>, String> {
-    let bytes = export_zip_bytes(&state).await.map_err(|e| e.to_string())?;
-    let app2 = app.clone();
-    tokio::task::spawn_blocking(move || {
-        save_via_dialog(
-            &app2,
-            bytes,
-            "Save Spoor export",
-            "spoor-export.zip",
-            "Zip archive",
-            "zip",
-        )
-    })
-    .await
-    .map_err(|e| e.to_string())?
-}
-
-#[tauri::command]
-async fn save_dump(app: AppHandle, state: State<'_, AppState>) -> Result<Option<String>, String> {
-    let bytes = capture_dump_gzip(&state).await.map_err(|e| e.to_string())?;
-    let app2 = app.clone();
-    tokio::task::spawn_blocking(move || {
-        save_via_dialog(
-            &app2,
-            bytes,
-            "Save capture dump",
-            "spoor-capture.json.gz",
-            "Gzip JSON",
-            "gz",
-        )
-    })
-    .await
-    .map_err(|e| e.to_string())?
-}
-
-#[tauri::command]
-fn set_filter(pattern: String, action: String) -> Result<FilterOutcome, String> {
-    persist_filter_preference(FilterPreferenceRequest { pattern, action })
-        .map_err(|e| e.to_string())
-}
-
-#[tauri::command]
-fn list_sessions() -> Result<SessionsSnapshot, String> {
-    sessions_snapshot().map_err(|e| e.to_string())
-}
-
-#[tauri::command]
-async fn load_session(
-    app: AppHandle,
-    state: State<'_, AppState>,
-    id: String,
-) -> Result<StatusSnapshot, String> {
-    do_load_session(&app, &state, &id).await?;
-    Ok(status_snapshot(&state).await)
-}
-
-#[tauri::command]
-fn delete_session(state: State<'_, AppState>, id: String) -> Result<SessionsSnapshot, String> {
-    delete_stored_session(&state, &id).map_err(|e| e.to_string())?;
-    sessions_snapshot().map_err(|e| e.to_string())
-}
-
-#[tauri::command]
-fn delete_all_sessions(state: State<'_, AppState>) -> Result<SessionsSnapshot, String> {
-    delete_all_stored_sessions(&state).map_err(|e| e.to_string())?;
-    sessions_snapshot().map_err(|e| e.to_string())
+        app.exit(0);
+    });
 }
 
 fn setup_tray(app: &tauri::App) -> tauri::Result<()> {
     let show = MenuItem::with_id(app, "show", "Show Spoor", true, None::<&str>)?;
-    let record = MenuItem::with_id(app, "record", "Start recording", true, None::<&str>)?;
-    let stop = MenuItem::with_id(app, "stop", "Stop", true, None::<&str>)?;
-    let quit = MenuItem::with_id(app, "quit", "Quit", true, None::<&str>)?;
-    let menu = Menu::with_items(app, &[&show, &record, &stop, &quit])?;
+    let stop = MenuItem::with_id(app, "stop_all", "Stop all sites", true, None::<&str>)?;
+    let quit_item = MenuItem::with_id(app, "quit", "Quit", true, None::<&str>)?;
+    let menu = Menu::with_items(app, &[&show, &stop, &quit_item])?;
 
     let mut tray = TrayIconBuilder::with_id(TRAY_ID)
         .menu(&menu)
         .show_menu_on_left_click(true)
         .tooltip("Spoor")
-        .on_menu_event(|app, event| {
-            let id = event.id.as_ref().to_string();
-            match id.as_str() {
-                "show" => show_main(app),
-                "quit" => app.exit(0),
-                "record" | "stop" => {
-                    let app = app.clone();
-                    tauri::async_runtime::spawn(async move {
-                        let Some(state) = app.try_state::<AppState>() else {
-                            return;
-                        };
-                        let result = if id == "record" {
-                            do_start(&app, state.inner()).await
-                        } else {
-                            do_stop(&app, state.inner()).await
-                        };
-                        if let Err(e) = result {
-                            spoor::log::error(format!("tray {id} failed: {e}"));
-                        }
-                    });
-                }
-                _ => {}
+        .on_menu_event(|app, event| match event.id.as_ref() {
+            "show" => show_main(app),
+            "quit" => quit(app),
+            "stop_all" => {
+                let app = app.clone();
+                tauri::async_runtime::spawn(async move {
+                    if let Some(service) = app.try_state::<Service>()
+                        && let Ok(client) = service.client().await
+                        && let Err(e) = client.post::<Value>("/stop", &json!({})).await
+                    {
+                        spoor::log::error(format!("tray stop failed: {e:#}"));
+                    }
+                });
             }
+            _ => {}
         })
         .on_tray_icon_event(|tray, event| {
             if let TrayIconEvent::DoubleClick {
@@ -320,49 +231,61 @@ fn setup_tray(app: &tauri::App) -> tauri::Result<()> {
     Ok(())
 }
 
+fn init_tracing() {
+    use tracing_subscriber::EnvFilter;
+    let filter = EnvFilter::try_from_default_env()
+        .unwrap_or_else(|_| EnvFilter::new("warn,chromiumoxide=error,tungstenite=error"));
+    tracing_subscriber::fmt()
+        .with_env_filter(filter)
+        .with_target(false)
+        .try_init()
+        .ok();
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
-    load_env();
     init_tracing();
     spoor::log::init(cfg!(debug_assertions));
 
     tauri::Builder::default()
-        .plugin(tauri_plugin_dialog::init())
+        .manage(Service::default())
         .setup(|app| {
-            let chromium = tauri::async_runtime::block_on(spoor::browser_util::ensure_chromium())?;
-            let state = AppState::new(chromium);
-            let watch_state = state.clone();
-            let watch_app = app.handle().clone();
-            app.manage(state);
-            tauri::async_runtime::spawn(flow_watch(watch_app, watch_state));
             setup_tray(app)?;
+            // Connect (or start the service) right away, not on first click.
+            let handle = app.handle().clone();
+            tauri::async_runtime::spawn(async move {
+                if let Err(e) = handle.state::<Service>().client().await {
+                    spoor::log::error(format!("session service unavailable: {e}"));
+                }
+            });
             Ok(())
         })
         .on_window_event(|window, event| {
+            // Closing the window hides to the tray; Quit is in the tray menu.
             if let tauri::WindowEvent::CloseRequested { api, .. } = event {
                 api.prevent_close();
                 let _ = window.hide();
             }
         })
         .invoke_handler(tauri::generate_handler![
-            start,
-            stop,
-            status,
-            candidates,
-            generate,
-            save_export,
-            save_dump,
-            set_filter,
-            list_sessions,
-            load_session,
-            delete_session,
-            delete_all_sessions
+            sites,
+            site_status,
+            open_site,
+            record_start,
+            record_stop,
+            stop_site,
+            stop_all,
+            add_site,
+            remove_site,
+            sessions
         ])
         .build(tauri::generate_context!())
         .expect("error while building Spoor")
-        .run(|app_handle, event| {
-            if let tauri::RunEvent::Reopen { .. } = event {
-                show_main(app_handle);
+        .run(|_app_handle, _event| {
+            // Dock-icon click (macOS only) brings the hidden window back.
+            #[cfg(target_os = "macos")]
+            if let tauri::RunEvent::Reopen { .. } = _event {
+                show_main(_app_handle);
             }
         });
 }

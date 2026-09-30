@@ -1,448 +1,195 @@
 <script lang="ts">
   import { onMount } from 'svelte';
-  import { listen } from '@tauri-apps/api/event';
-  import { SvelteMap, SvelteSet } from 'svelte/reactivity';
-  import SurfaceList from '$lib/SurfaceList.svelte';
-  import SessionsPanel from '$lib/SessionsPanel.svelte';
+  import { SvelteMap } from 'svelte/reactivity';
   import {
-    buildApiGroups,
-    formatStatusLine,
-    preferencePattern,
-  } from '$lib/groups';
-  import {
-    deleteAllSessions,
-    deleteSession,
-    generatePack,
-    getStatus,
+    addSite,
     listSessions,
-    loadSession,
-    saveDump,
-    saveExport,
-    setFilter,
-    startRecording,
-    stopRecording,
+    listSites,
+    openSite,
+    recordStart,
+    recordStop,
+    removeSite,
+    siteStatus,
+    stopAll,
+    stopSite,
   } from '$lib/ipc';
-  import type {
-    ApiGroup,
-    Candidate,
-    DiscoverFinished,
-    OpState,
-    SessionsSnapshot,
-    StatusSnapshot,
-  } from '$lib/types';
+  import type { SessionRow, SiteInfo } from '$lib/types';
 
-  let status = $state<StatusSnapshot>({
-    recording: false,
-    analyzing: false,
-    flow_count: 0,
-    spec_ready: false,
-    candidate_count: 0,
-    graphql_ops: 0,
-    jsonrpc_ops: 0,
-    rest_endpoints: 0,
-    websocket_ops: 0,
-    form_ops: 0,
-    grpc_ops: 0,
-    traffic_graphql: 0,
-    traffic_jsonrpc: 0,
-    traffic_rest: 0,
-    traffic_websocket: 0,
-    flows_classified: 0,
-    flows_filtered: 0,
-    flows_capped: false,
-    undecoded_binary: 0,
-    websocket_frames: 0,
-    grpc_or_protobuf: 0,
-    filters_config: '',
-  });
-  let candidates = $state.raw<Candidate[]>([]);
-  let opState = new SvelteMap<string, OpState>();
-  let expanded = new SvelteSet<string>();
+  const POLL_MS = 2000;
+
+  let sites = $state.raw<SiteInfo[]>([]);
+  let sessions = $state.raw<SessionRow[]>([]);
+  let connected = $state(false);
   let error = $state('');
-  let warn = $state('');
-  let redact = $state(false);
-  let busy = $state(false);
-  let sessions = $state.raw<SessionsSnapshot | null>(null);
+  let busy = new SvelteMap<string, boolean>();
+  /** Last check result per site: true / false / null (no check script). */
+  let checks = new SvelteMap<string, boolean | null>();
 
-  let apiGroups = $derived(buildApiGroups(candidates));
-  let candidatesLoaded = $derived(candidates.length > 0);
-  let statusLine = $derived(
-    formatStatusLine(status, apiGroups.length, candidatesLoaded),
-  );
-  let selectedOps = $derived(
-    candidates.filter((c) => opState.get(c.id)?.checked).length,
-  );
-  let selectedApis = $derived(
-    apiGroups.filter((g) => groupCheckState(g) === 'all').length,
-  );
-  let partialApis = $derived(
-    apiGroups.filter((g) => groupCheckState(g) === 'partial').length,
-  );
-  let selectedSummary = $derived.by(() => {
-    let text = `${selectedOps} of ${candidates.length} operations`;
-    if (apiGroups.length) {
-      text += ` · ${selectedApis} API(s) full`;
-      if (partialApis) text += `, ${partialApis} partial`;
-    }
-    return text;
-  });
-  let generateDisabled = $derived(
-    status.recording || status.analyzing || !candidatesLoaded || busy,
-  );
-  let dumpVisible = $derived(!status.recording && status.flow_count > 0);
-  let saveVisible = $derived(status.spec_ready);
+  let newName = $state('');
+  let newUrl = $state('');
 
-  function groupCheckState(group: ApiGroup): 'none' | 'all' | 'partial' {
-    const checked = group.ops.filter((op) => opState.get(op.id)?.checked).length;
-    if (checked === 0) return 'none';
-    if (checked === group.ops.length) return 'all';
-    return 'partial';
-  }
-
-  function adoptCandidates(list: Candidate[]) {
-    candidates = list;
-    opState.clear();
-    expanded.clear();
-    for (const c of list) {
-      // Product law: patterns are pre-filled, never pre-selected.
-      opState.set(c.id, { checked: false, pattern: c.guessed_pattern });
-    }
-  }
-
-  function setOp(id: string, patch: Partial<OpState>) {
-    const prev = opState.get(id) ?? { checked: false, pattern: '' };
-    opState.set(id, { ...prev, ...patch });
-  }
-
-  function toggleGroup(group: ApiGroup, checked: boolean) {
-    for (const op of group.ops) {
-      setOp(op.id, { checked });
-    }
-  }
-
-  function toggleExpand(key: string) {
-    if (expanded.has(key)) expanded.delete(key);
-    else expanded.add(key);
-  }
-
-  function selectAll() {
-    for (const g of apiGroups) toggleGroup(g, true);
-  }
-
-  function selectNone() {
-    for (const g of apiGroups) toggleGroup(g, false);
-  }
-
-  async function refreshSessions() {
+  async function refresh() {
     try {
-      sessions = await listSessions();
+      sites = await listSites();
+      sessions = (await listSessions()).slice(0, 8);
+      connected = true;
     } catch (e) {
+      connected = false;
       error = String(e);
     }
   }
 
-  async function onLoadSession(id: string) {
+  /** Run one action for a site, with its buttons disabled meanwhile. */
+  async function act(site: string, fn: () => Promise<unknown>) {
+    busy.set(site, true);
     error = '';
-    warn = '';
-    adoptCandidates([]);
-    busy = true;
     try {
-      status = await loadSession(id);
-      warn = `Loaded ${id}`;
+      await fn();
     } catch (e) {
-      error = String(e);
+      error = `${site}: ${e}`;
     } finally {
-      busy = false;
+      busy.delete(site);
+      await refresh();
     }
   }
 
-  async function onDeleteSession(id: string) {
-    error = '';
-    warn = '';
-    try {
-      sessions = await deleteSession(id);
-      warn = `Deleted ${id}`;
-    } catch (e) {
-      error = String(e);
+  const check = (site: string) =>
+    act(site, async () => {
+      const s = await siteStatus(site);
+      checks.set(site, s.logged_in);
+      if (s.error) error = `${site}: ${s.error}`;
+    });
+
+  async function add(event: SubmitEvent) {
+    event.preventDefault();
+    const name = newName.trim();
+    const url = newUrl.trim();
+    if (!name || !url) return;
+    await act(name, () => addSite(name, url, null));
+    if (!error) {
+      newName = '';
+      newUrl = '';
     }
   }
 
-  async function onDeleteAllSessions() {
-    error = '';
-    warn = '';
-    try {
-      sessions = await deleteAllSessions();
-      warn = 'Deleted all captured sessions';
-    } catch (e) {
-      error = String(e);
-    }
-  }
-
-  async function onStart() {
-    error = '';
-    warn = '';
-    adoptCandidates([]);
-    busy = true;
-    try {
-      status = await startRecording();
-    } catch (e) {
-      error = String(e);
-    } finally {
-      busy = false;
-    }
-  }
-
-  async function onStop() {
-    error = '';
-    warn = '';
-    busy = true;
-    try {
-      status = await stopRecording();
-    } catch (e) {
-      error = String(e);
-    } finally {
-      busy = false;
-    }
-  }
-
-  async function onGenerate() {
-    const selected = candidates
-      .filter((c) => opState.get(c.id)?.checked)
-      .map((c) => ({
-        id: c.id,
-        pattern: opState.get(c.id)?.pattern || c.guessed_pattern || null,
-      }));
-    if (!selected.length) {
-      error = 'Select at least one API or operation';
-      return;
-    }
-    error = '';
-    warn = '';
-    busy = true;
-    try {
-      const outcome = await generatePack(selected, redact);
-      if (outcome.warnings?.length) {
-        warn = outcome.warnings.join(' · ');
-      }
-      status = await getStatus();
-      const saved = await saveExport();
-      if (saved) {
-        warn = warn ? `${warn} · Saved ${saved}` : `Saved ${saved}`;
-      }
-    } catch (e) {
-      error = String(e);
-    } finally {
-      busy = false;
-    }
-  }
-
-  async function onSaveZip() {
-    error = '';
-    try {
-      const saved = await saveExport();
-      if (saved) warn = `Saved ${saved}`;
-    } catch (e) {
-      error = String(e);
-    }
-  }
-
-  async function onSaveDump() {
-    error = '';
-    try {
-      const saved = await saveDump();
-      if (saved) warn = `Saved capture ${saved}`;
-    } catch (e) {
-      error = String(e);
-    }
-  }
-
-  async function onPrefer(
-    op: Candidate,
-    group: ApiGroup,
-    action: 'ignore' | 'allow',
-  ) {
-    const pattern = preferencePattern(
-      group,
-      opState.get(op.id)?.pattern || op.guessed_pattern || '',
-    );
-    error = '';
-    warn = '';
-    try {
-      const data = await setFilter(pattern, action);
-      warn = `${data.message}: ${pattern} → ${data.config_path}`;
-      const next = candidates.map((c) =>
-        c.id === op.id
-          ? {
-              ...c,
-              preference_ignored: action === 'ignore',
-              default_selected: action === 'allow',
-            }
-          : c,
-      );
-      candidates = next;
-      setOp(op.id, {
-        checked: action === 'allow',
-        pattern: opState.get(op.id)?.pattern || op.guessed_pattern,
-      });
-    } catch (e) {
-      error = String(e);
-    }
+  function checkLabel(site: SiteInfo): string {
+    if (!site.check) return '';
+    const v = checks.get(site.name);
+    if (v === undefined) return 'not checked';
+    return v ? 'logged in' : 'logged out';
   }
 
   onMount(() => {
-    const unsubs: Array<() => void> = [];
-    let cancelled = false;
-
-    getStatus()
-      .then((s) => {
-        status = s;
-      })
-      .catch((e) => {
-        error = String(e);
-      });
-    refreshSessions();
-
-    listen<StatusSnapshot>('status', (e) => {
-      status = e.payload;
-    }).then((u) => {
-      if (cancelled) u();
-      else unsubs.push(u);
-    });
-
-    listen<number>('flow-count', (e) => {
-      status = { ...status, flow_count: e.payload };
-    }).then((u) => {
-      if (cancelled) u();
-      else unsubs.push(u);
-    });
-
-    listen<DiscoverFinished>('discover-finished', (e) => {
-      if (!e.payload.ok) {
-        error = e.payload.error || 'Discover failed';
-        void refreshSessions();
-        return;
-      }
-      adoptCandidates(e.payload.candidates);
-      void refreshSessions();
-    }).then((u) => {
-      if (cancelled) u();
-      else unsubs.push(u);
-    });
-
-    return () => {
-      cancelled = true;
-      for (const u of unsubs) u();
-    };
+    refresh();
+    const timer = setInterval(refresh, POLL_MS);
+    return () => clearInterval(timer);
   });
 </script>
 
-<div class="card">
-  <h1>Spoor</h1>
-  <p class="hint">
-    Start → browse → Stop → select APIs → Generate. Closing this window hides it
-    to the tray (Quit from the tray to exit). <strong>Ignore</strong> adds to
-    your filters file (still captured, listed, unchecked next time).
-    <strong>Allow</strong> on grey ops removes that ignore.
-  </p>
-  <div class="status-row">
-    <div
-      class={['dot', status.recording && 'recording', status.analyzing && 'analyzing']}
-    ></div>
-    <span>
-      {#if status.recording}
-        Recording
-      {:else if status.analyzing}
-        Discovering…
-      {:else}
-        Ready
-      {/if}
-    </span>
-  </div>
-  <div class="counter" title={status.filters_config}>{statusLine}</div>
-  <div class="buttons">
-    <button
-      class="btn-primary"
-      disabled={status.recording || status.analyzing || busy}
-      onclick={onStart}
-    >
-      Start
+<main>
+  <section class="card">
+    <div class="title-row">
+      <h1>Spoor</h1>
+      <span class="service" class:ok={connected}>
+        {connected ? 'service running' : 'starting service…'}
+      </span>
+    </div>
+    <p class="hint">
+      One logged-in browser per site. Log in with <b>Open</b>; scripts and agents
+      then use the session via <code>spoor exec</code> or the local API.
+    </p>
+    <button class="btn-danger" onclick={() => act('all', stopAll)} disabled={!connected}>
+      Stop all sites
     </button>
-    <button class="btn-danger" disabled={!status.recording} onclick={onStop}>
-      Stop
-    </button>
-    {#if dumpVisible}
-      <button class="btn-dump" type="button" onclick={onSaveDump}>
-        Save capture
-      </button>
+  </section>
+
+  <section class="card">
+    <h2>Sites</h2>
+    {#if sites.length === 0}
+      <p class="hint">No sites yet. Add one below, or run <code>spoor site add</code>.</p>
     {/if}
-  </div>
-  {#if error}
-    <div class="error">{error}</div>
-  {/if}
-  {#if warn}
-    <div class="warn">{warn}</div>
-  {/if}
-</div>
+    {#each sites as site (site.name)}
+      {@const isBusy = busy.has(site.name)}
+      <div class="site">
+        <div class="site-head">
+          <span class="dot" class:running={site.running} class:recording={!!site.recording}></span>
+          <span class="name">{site.name}</span>
+          {#if site.recording}<span class="badge rec">recording</span>{/if}
+          {#if checkLabel(site)}
+            <span class="badge" class:good={checks.get(site.name) === true}>{checkLabel(site)}</span>
+          {/if}
+        </div>
+        <div class="url" title={site.url}>{site.url}</div>
+        <div class="buttons">
+          <button class="btn-primary" disabled={isBusy} onclick={() => act(site.name, () => openSite(site.name))}>
+            Open
+          </button>
+          {#if site.recording}
+            <button class="btn-danger" disabled={isBusy} onclick={() => act(site.name, () => recordStop(site.name))}>
+              Stop recording
+            </button>
+          {:else}
+            <button class="btn-accent" disabled={isBusy} onclick={() => act(site.name, () => recordStart(site.name))}>
+              Record
+            </button>
+          {/if}
+          {#if site.check}
+            <button class="btn-plain" disabled={isBusy} onclick={() => check(site.name)}>Check</button>
+          {/if}
+          {#if site.running}
+            <button class="btn-plain" disabled={isBusy} onclick={() => act(site.name, () => stopSite(site.name))}>
+              Close browser
+            </button>
+          {:else}
+            <button class="btn-link" disabled={isBusy} onclick={() => act(site.name, () => removeSite(site.name))}>
+              Remove
+            </button>
+          {/if}
+        </div>
+      </div>
+    {/each}
 
-{#if apiGroups.length}
-  <div class="card">
-    <h2>APIs</h2>
-    <div class="toolbar">
-      <button type="button" class="btn-link" onclick={selectAll}>
-        Select all APIs
-      </button>
-      <button type="button" class="btn-link" onclick={selectNone}>
-        Select none
-      </button>
-      <span class="selected-count">{selectedSummary}</span>
-    </div>
-    <SurfaceList
-      groups={apiGroups}
-      {opState}
-      {expanded}
-      ontogglegroup={toggleGroup}
-      ontoggleop={(id, checked) => setOp(id, { checked })}
-      onpattern={(id, pattern) => setOp(id, { pattern })}
-      onprefer={onPrefer}
-      ontoggleexpand={toggleExpand}
-    />
-    <div class="buttons">
-      <button class="btn-accent" disabled={generateDisabled} onclick={onGenerate}>
-        Generate
-      </button>
-      {#if saveVisible}
-        <button class="btn-download" type="button" onclick={onSaveZip}>
-          Save zip
-        </button>
-      {/if}
-    </div>
-    <label
-      class="opt-row"
-      title="When on, replaces known secret field names and JWT-shaped strings in examples."
-    >
-      <input type="checkbox" bind:checked={redact} />
-      <span>Redact secrets in examples</span>
-    </label>
-  </div>
-{/if}
+    <form class="add" onsubmit={add}>
+      <input placeholder="name (e.g. cas)" bind:value={newName} spellcheck="false" />
+      <input placeholder="https://…" bind:value={newUrl} spellcheck="false" />
+      <button class="btn-primary" type="submit" disabled={!newName.trim() || !newUrl.trim()}>Add</button>
+    </form>
+    {#if error}<p class="error">{error}</p>{/if}
+  </section>
 
-<SessionsPanel
-  snapshot={sessions}
-  recording={status.recording}
-  analyzing={status.analyzing}
-  {busy}
-  onload={onLoadSession}
-  ondelete={onDeleteSession}
-  ondeleteall={onDeleteAllSessions}
-/>
+  <section class="card">
+    <h2>Recent recordings</h2>
+    {#if sessions.length === 0}
+      <p class="hint">None yet. <b>Record</b> a site, use it, then stop.</p>
+    {/if}
+    {#each sessions as s (s.id)}
+      <div class="session" title={s.path}>
+        <span class="name">{s.site ?? '—'}</span>
+        <span class="meta">{s.started_at.replace('T', ' ').replace('Z', '')} · {s.flows} flows · {s.size}</span>
+        <code class="sid">{s.id}</code>
+      </div>
+    {/each}
+    {#if sessions.length}
+      <p class="hint">Inspect with <code>spoor flows &lt;id&gt;</code> and <code>spoor trace &lt;id&gt; &lt;value&gt;</code>.</p>
+    {/if}
+  </section>
+</main>
 
 <style>
+  main {
+    padding: 4px 0 12px;
+  }
   .card {
     background: #16213e;
     border-radius: 10px;
     padding: 14px;
     box-shadow: 0 4px 20px rgba(0, 0, 0, 0.3);
     margin: 12px;
+  }
+  .title-row {
+    display: flex;
+    align-items: baseline;
+    justify-content: space-between;
   }
   h1 {
     font-size: 1.1rem;
@@ -454,17 +201,44 @@
     color: #dfe6e9;
     margin: 0 0 8px;
   }
+  .service {
+    font-size: 0.7rem;
+    color: #fdcb6e;
+  }
+  .service.ok {
+    color: #00b894;
+  }
   .hint {
     font-size: 0.75rem;
     color: #b2bec3;
-    line-height: 1.35;
     margin: 0 0 10px;
   }
-  .status-row {
+  code {
+    font-size: 0.72rem;
+    color: #dfe6e9;
+    background: #0f1830;
+    padding: 1px 4px;
+    border-radius: 4px;
+  }
+  .site {
+    border-top: 1px solid #243056;
+    padding: 10px 0;
+  }
+  .site-head {
     display: flex;
     align-items: center;
     gap: 6px;
-    margin-bottom: 6px;
+  }
+  .name {
+    font-weight: 600;
+  }
+  .url {
+    font-size: 0.72rem;
+    color: #b2bec3;
+    margin: 2px 0 8px 14px;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
   }
   .dot {
     width: 8px;
@@ -473,12 +247,12 @@
     background: #636e72;
     flex-shrink: 0;
   }
-  .dot.recording {
+  .dot.running {
     background: #00b894;
-    animation: pulse 1.5s infinite;
   }
-  .dot.analyzing {
-    background: #fdcb6e;
+  .dot.recording {
+    background: #d63031;
+    animation: pulse 1.5s infinite;
   }
   @keyframes pulse {
     0%,
@@ -489,21 +263,30 @@
       opacity: 0.4;
     }
   }
-  .counter {
-    font-size: 0.8rem;
-    color: #b2bec3;
-    margin-bottom: 10px;
+  .badge {
+    font-size: 0.65rem;
+    padding: 1px 6px;
+    border-radius: 8px;
+    background: #2d3436;
+    color: #fdcb6e;
+  }
+  .badge.good {
+    color: #00b894;
+  }
+  .badge.rec {
+    color: #ff7675;
   }
   .buttons {
     display: flex;
     flex-wrap: wrap;
-    gap: 8px;
+    gap: 6px;
+    margin-left: 14px;
   }
   button {
     border: none;
     border-radius: 6px;
-    padding: 8px 12px;
-    font-size: 0.8rem;
+    padding: 6px 10px;
+    font-size: 0.75rem;
     font-weight: 600;
     cursor: pointer;
   }
@@ -523,11 +306,7 @@
     background: #6c5ce7;
     color: #fff;
   }
-  .btn-download {
-    background: #0984e3;
-    color: #fff;
-  }
-  .btn-dump {
+  .btn-plain {
     background: #2d3436;
     color: #dfe6e9;
     border: 1px solid #636e72;
@@ -535,41 +314,44 @@
   .btn-link {
     background: transparent;
     color: #74b9ff;
-    padding: 4px 0;
     font-weight: 500;
-    font-size: 0.75rem;
   }
-  .toolbar {
+  .add {
     display: flex;
-    align-items: center;
-    gap: 10px;
-    margin-bottom: 8px;
-    flex-wrap: wrap;
+    gap: 6px;
+    border-top: 1px solid #243056;
+    padding-top: 10px;
   }
-  .selected-count {
-    color: #b2bec3;
+  input {
+    flex: 1;
+    min-width: 0;
+    background: #0f1830;
+    border: 1px solid #243056;
+    border-radius: 6px;
+    color: #eee;
+    padding: 6px 8px;
     font-size: 0.75rem;
   }
   .error {
     color: #ff7675;
     font-size: 0.75rem;
-    margin-top: 8px;
+    margin: 8px 0 0;
+    word-break: break-word;
   }
-  .warn {
-    color: #fdcb6e;
+  .session {
+    display: grid;
+    grid-template-columns: auto 1fr;
+    column-gap: 8px;
+    padding: 6px 0;
+    border-top: 1px solid #243056;
     font-size: 0.75rem;
-    margin-top: 8px;
   }
-  .opt-row {
-    display: flex;
-    align-items: center;
-    gap: 8px;
-    margin-top: 10px;
-    font-size: 0.75rem;
-    color: #dfe6e9;
-    cursor: pointer;
+  .session .meta {
+    color: #b2bec3;
   }
-  .opt-row input {
-    accent-color: #00b894;
+  .sid {
+    grid-column: 1 / -1;
+    margin-top: 2px;
+    justify-self: start;
   }
 </style>

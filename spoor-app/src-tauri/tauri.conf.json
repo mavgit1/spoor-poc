@@ -1,7 +1,7 @@
 {
   "$schema": "https://schema.tauri.app/config/2",
   "productName": "Spoor",
-  "version": "0.5.0",
+  "version": "0.6.0",
   "identifier": "com.spoor.app",
   "build": {
     "beforeDevCommand": "npm run dev",
@@ -14,8 +14,8 @@
       {
         "label": "main",
         "title": "Spoor",
-        "width": 400,
-        "height": 560,
+        "width": 420,
+        "height": 620,
         "minWidth": 360,
         "minHeight": 480,
         "resizable": true
@@ -27,10 +27,13 @@
   },
   "bundle": {
     "active": true,
-    "targets": ["app", "dmg"],
+    "targets": [
+      "app",
+      "dmg"
+    ],
     "category": "DeveloperTool",
-    "shortDescription": "Capture live browser APIs into an agent pack",
-    "longDescription": "Spoor records browser API traffic, classifies it, and exports a curated observation pack. Recording runs in an isolated Chrome profile; this window is the curation UI.",
+    "shortDescription": "Logged-in browser sessions per site, for scripts and agents",
+    "longDescription": "Spoor keeps one persistent browser profile per website. Log in once; scripts and agents then run inside that session through a local API. Recording captures traffic for figuring a site out.",
     "macOS": {
       "minimumSystemVersion": "11.0"
     },

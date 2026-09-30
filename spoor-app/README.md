@@ -1,6 +1,14 @@
 # Spoor desktop app
 
-Native curation UI for [Spoor](../PLAN.md). The Tauri backend calls the `spoor` library over **IPC** — it does not start the headless HTTP server.
+A tray app and small site manager for [Spoor](../README.md). It lists your
+sites with **Open** (log in), **Record**, **Check** (run the site's check
+script) and **Close browser**, plus recent recordings and a *Stop all sites*
+kill switch.
+
+The app does not drive browsers itself. On launch it attaches to a running
+`spoor serve`, or runs the service in-process, and every button calls the
+same local API the CLI and integrations use. While the app is open, `spoor`
+commands in a terminal use its service.
 
 ## Dev
 
@@ -8,28 +16,19 @@ From this directory:
 
 ```bash
 npm install
-cargo tauri dev
+npm run tauri dev
 ```
 
-If the Tauri CLI is not on `PATH`, the same command via npm is `npm run tauri dev`.
-
-The first launch may download Chromium if no local Chrome is found (`SPOOR_CHROME` overrides). Optional `OPENROUTER_API_KEY` in a `.env` at the repo root is used only for LLM classify of ambiguous traffic.
-
-`cargo tauri dev` starts Vite on port 1420 for hot reload. That is **not** the old Spoor HTTP API — the desktop process does not bind an API port. Production builds (`cargo tauri build`) embed the frontend and listen on nothing.
+The first launch downloads the pinned Chromium if it isn't cached yet.
 
 ## Build
 
 ```bash
 npm install
-cargo tauri build
+npm run tauri build
 ```
 
-On macOS this produces `Spoor.app` and a `.dmg` under `target/release/bundle/` (workspace target directory at the repo root).
+Output goes to `target/release/bundle/` at the repo root.
 
-## Workflow
-
-Start recording (window or tray) → browse in the recording Chrome → Stop → select API surfaces → Generate. Generate opens a native save dialog for `spoor-export.zip`. Closing the window hides Spoor to the tray; Quit from the tray to exit.
-
-## Headless HTTP (not this app)
-
-`spoor --serve [--token TOKEN]` in the `spoor` crate still binds a localhost API for agents. Every request requires `Authorization: Bearer`. The desktop app never starts that listener.
+Closing the window hides it to the tray. Use **Quit** in the tray menu to
+exit; it closes every site browser and stops the service.

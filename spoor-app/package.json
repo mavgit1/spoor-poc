@@ -1,7 +1,7 @@
 {
   "name": "spoor-app",
-  "version": "0.5.0",
-  "description": "Spoor desktop app — capture browser API traffic and export agent packs",
+  "version": "0.6.0",
+  "description": "Spoor desktop app \u2014 logged-in browser sessions per site",
   "type": "module",
   "scripts": {
     "dev": "vite dev",

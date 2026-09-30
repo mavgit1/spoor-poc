@@ -1,9 +1,9 @@
 [package]
 name = "spoor-app"
-version = "0.5.0"
-description = "Spoor desktop app — capture browser API traffic and export agent packs"
+version = "0.6.0"
+description = "Spoor desktop app — logged-in browser sessions per site"
 authors = ["Spoor"]
-edition = "2021"
+edition = "2024"
 rust-version = "1.88"
 
 [lib]
@@ -16,10 +16,8 @@ tauri-build = { version = "2", features = [] }
 [dependencies]
 spoor = { path = "../../spoor" }
 anyhow = "1"
-dotenvy = "0.15"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 tauri = { version = "2", features = ["tray-icon"] }
-tauri-plugin-dialog = "2"
 tokio = { version = "1", features = ["macros", "rt-multi-thread", "sync", "time"] }
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }

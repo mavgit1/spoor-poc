@@ -1,63 +1,32 @@
 import { invoke } from '@tauri-apps/api/core';
-import type {
-  CandidatesSnapshot,
-  FilterOutcome,
-  GenerateOutcome,
-  GenerateSelection,
-  SessionsSnapshot,
-  StatusSnapshot,
-} from './types';
+import type { RecordInfo, SessionRow, SiteInfo, SiteStatus } from './types';
 
-export function startRecording(): Promise<StatusSnapshot> {
-  return invoke('start');
-}
+export const listSites = (): Promise<SiteInfo[]> => invoke('sites');
 
-export function stopRecording(): Promise<StatusSnapshot> {
-  return invoke('stop');
-}
+export const siteStatus = (site: string): Promise<SiteStatus> =>
+  invoke('site_status', { site });
 
-export function getStatus(): Promise<StatusSnapshot> {
-  return invoke('status');
-}
+export const openSite = (site: string): Promise<unknown> =>
+  invoke('open_site', { site });
 
-export function getCandidates(): Promise<CandidatesSnapshot> {
-  return invoke('candidates');
-}
+export const recordStart = (site: string): Promise<RecordInfo> =>
+  invoke('record_start', { site });
 
-export function generatePack(
-  selected: GenerateSelection[],
-  redact: boolean,
-): Promise<GenerateOutcome> {
-  return invoke('generate', { selected, redact });
-}
+export const recordStop = (site: string): Promise<RecordInfo> =>
+  invoke('record_stop', { site });
 
-export function saveExport(): Promise<string | null> {
-  return invoke('save_export');
-}
+export const stopSite = (site: string): Promise<unknown> =>
+  invoke('stop_site', { site });
 
-export function saveDump(): Promise<string | null> {
-  return invoke('save_dump');
-}
+export const stopAll = (): Promise<unknown> => invoke('stop_all');
 
-export function setFilter(
-  pattern: string,
-  action: 'ignore' | 'allow',
-): Promise<FilterOutcome> {
-  return invoke('set_filter', { pattern, action });
-}
+export const addSite = (
+  name: string,
+  url: string,
+  minGapMs: number | null,
+): Promise<void> => invoke('add_site', { name, url, minGapMs });
 
-export function listSessions(): Promise<SessionsSnapshot> {
-  return invoke('list_sessions');
-}
+export const removeSite = (name: string): Promise<void> =>
+  invoke('remove_site', { name });
 
-export function loadSession(id: string): Promise<StatusSnapshot> {
-  return invoke('load_session', { id });
-}
-
-export function deleteSession(id: string): Promise<SessionsSnapshot> {
-  return invoke('delete_session', { id });
-}
-
-export function deleteAllSessions(): Promise<SessionsSnapshot> {
-  return invoke('delete_all_sessions');
-}
+export const listSessions = (): Promise<SessionRow[]> => invoke('sessions');
