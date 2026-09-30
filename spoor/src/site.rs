@@ -119,7 +119,7 @@ mod tests {
 
     #[test]
     fn names_are_single_safe_segments() {
-        for ok in ["cas", "hostpoint", "my-site_2"] {
+        for ok in ["cas", "panel", "my-site_2"] {
             assert!(is_valid_name(ok), "{ok}");
         }
         for bad in ["", "Cas", "../x", "a/b", "a b", "x.y", &"a".repeat(65)] {

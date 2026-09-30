@@ -34,7 +34,7 @@ Spoor enforces two things itself, because they need no knowledge of the site:
 - **Audit log**: every request an exec makes, in `audit/<site>.jsonl`.
 
 Whether a request reads or writes is not Spoor's call. That depends on the
-site's API design (a Hostpoint DNS *read* is a POST), so it stays with the
+site's API design (plenty of panels *read* with a POST), so it stays with the
 script and whoever runs it.
 
 ## Quick start
@@ -42,12 +42,11 @@ script and whoever runs it.
 ```bash
 cargo build --release -p spoor          # binary: target/release/spoor
 
-spoor site add hostpoint https://admin.hostpoint.ch/customer/Index \
-    --check examples/hostpoint/check.js --min-gap-ms 1500
-spoor open hostpoint                    # log in in the window that appears
-spoor status hostpoint                  # → "logged_in": true
-spoor exec hostpoint -e "return document.title"
-spoor exec hostpoint examples/hostpoint/export-dns.js --timeout 1800 > dns.json
+spoor site add panel https://panel.example.com/ --check checks/panel.js
+spoor open panel                        # log in in the window that appears
+spoor status panel                      # → "logged_in": true
+spoor exec panel -e "return document.title"
+spoor exec panel scripts/export.js --timeout 1800 > export.json
 ```
 
 The first command that needs the browser starts `spoor serve` in the
@@ -82,7 +81,7 @@ spoor record cas            # use the site; press Enter to stop
 spoor sessions              # recordings, newest first
 spoor flows <id>            # seq METHOD status type url — one line per request
 spoor flows <id> --grep Zeiterfassung --full   # matching flows as JSON lines
-spoor trace <id> 805415     # where did this value first appear, and where was it sent?
+spoor trace <id> 4242       # where did this value first appear, and where was it sent?
 ```
 
 `trace` finds values that come from HTML: an id in a hidden `<input>`, a

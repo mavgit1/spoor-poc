@@ -184,27 +184,27 @@ mod tests {
         }
     }
 
-    /// The Hostpoint shape: an id first shows up in page HTML, then is posted back.
-    fn hostpoint_like() -> Vec<CaptureRecord> {
+    /// A common shape: an id first shows up in page HTML, then is posted back.
+    fn id_from_html() -> Vec<CaptureRecord> {
         vec![
             flow(
                 3,
                 "POST",
-                "https://panel.test/dns/edit?name=a.ch",
-                Some("_action_get_records=1&id=805415"),
-                Some(r#"{"records":[]}"#),
+                "https://app.test/items/edit?name=a",
+                Some("op=load&id=4242"),
+                Some(r#"{"items":[]}"#),
             ),
             flow(
                 1,
                 "GET",
-                "https://panel.test/dns/edit?name=a.ch",
+                "https://app.test/items/edit?name=a",
                 None,
-                Some(r#"<form>  <input type="hidden" name="domainId" value="805415"> </form>"#),
+                Some(r#"<form>  <input type="hidden" name="itemId" value="4242"> </form>"#),
             ),
             flow(
                 2,
                 "GET",
-                "https://panel.test/api/me",
+                "https://app.test/api/me",
                 None,
                 Some(r#"{"user":"x"}"#),
             ),
@@ -213,14 +213,14 @@ mod tests {
 
     #[test]
     fn trace_finds_origin_and_use() {
-        let t = trace(&hostpoint_like(), "805415");
+        let t = trace(&id_from_html(), "4242");
         assert_eq!(t.appears_in.len(), 1);
         assert_eq!(t.appears_in[0].sequence, 1);
         assert_eq!(t.appears_in[0].place, "response body");
         assert!(
             t.appears_in[0]
                 .snippet
-                .contains(r#"name="domainId" value="805415""#)
+                .contains(r#"name="itemId" value="4242""#)
         );
         assert_eq!(t.used_in.len(), 1);
         assert_eq!(t.used_in[0].place, "request body");
@@ -229,13 +229,13 @@ mod tests {
 
     #[test]
     fn matching_flows_is_ordered_and_filtered() {
-        let flows = hostpoint_like();
+        let flows = id_from_html();
         let seqs: Vec<u64> = matching_flows(&flows, None)
             .iter()
             .map(|f| f.sequence)
             .collect();
         assert_eq!(seqs, vec![1, 2, 3]);
-        let seqs: Vec<u64> = matching_flows(&flows, Some("_action_get_records"))
+        let seqs: Vec<u64> = matching_flows(&flows, Some("op=load"))
             .iter()
             .map(|f| f.sequence)
             .collect();
