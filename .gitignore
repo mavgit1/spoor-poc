@@ -1,6 +1,3 @@
-# Local plan (not in repo)
-PLAN.md
-
 # Secrets & local config
 .env
 openrouter.json
