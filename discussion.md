@@ -1,116 +1,118 @@
-browser profile you can also delete this time
+on purpose:
 
+Spoor's browser profile for Hostpoint, which is your login. Without it you'd have to log in again.
 
+The deliverables in the IntegratedWorkspace (reports/2026-09-30-hostpoint/). I didn't touch them; they're outside this repo.
 
-but
+README.md
 
++34
 
+\-1
 
-back to spoor; i didnt feel like this was a tool at all; like for me the user - an ui popped up, i could doo something and had to trust you and i had no ui way to interact with it
 
 
+Not stupid at all. That's the right shape, and a well-known pattern: CLI tools like the AWS SSO login, rclone or Playwright's storageState work exactly like this. One refinement to the token point, so the plan holds up:
 
-\----
 
 
+What you actually get from the login window
 
-also you had some experience using it now; how good did it do what you needed and how much oyu had to improvise?
 
 
+The Microsoft token itself is bound to CAS (audience/client\_id = CAS), and it usually never reaches the browser anyway: CAS redeems it on the server and gives you its own CAS session (cookie, sometimes a CAS token). So what your app captures is CAS's session, and it works for CAS, not for "whatever". That's no restriction, though, because it's exactly what your app needs.
 
-\_\_\_\_
 
 
+What to watch with that kind of session:
 
-task:
 
 
+HttpOnly cookies: page JavaScript can't read them, so the harness has to take them from the browser's cookie store. That's no problem for an extension or Playwright.
 
-2-3 suggestions how the ui / human interaction could be solved; i need be able to do stuff and have info ready for agent etc.
+Binding: some sites tie the session to IP, user agent or device. Then it only works from the same machine. The replay check shows that.
 
+Lifetime: if the session expires daily, the window opens daily. With a persistent profile, though, the Microsoft SSO is often still valid, and the window opens and closes by itself without a click.
 
+Spoor's role: evidence, not answers
 
-with ui suggestion i mean the "where / how" technically and not the "what"
 
 
+I agree completely. Spoor doesn't have to conclude anything; it has to make sure the agent can see everything that's needed:
 
-and 2. an assessment on how your run went and what if any would need change and associated effort
 
 
+the complete recording of the auth chain across all domains, including cookies, Set-Cookie, redirects and browser storage;
 
-That fits into a plan: most of the current code gets replaced, and only concepts and a few parts carry over.
+lifetimes (cookie expiry, token exp);
 
+the result of the replay check (does this request work outside the browser, and with what?);
 
+whatever is visible on the site that points to an API (e.g. CAS's own REST endpoints in the traffic, or a /api/ documentation link).
 
-But I'll keep the plan without the topic of making Spoor undetectable for websites, and limit it to automating your own internal tools with your own accounts. That was the part that got stopped.
 
 
+The agent draws the conclusion itself: "there's a CAS API", "simple form login, plain HTTP is enough", or "harness needed". That keeps Spoor general and small.
 
-Created PLAN.md (1 failed), ran 2 commands, received a notice
 
-I couldn't write the plan. The safety check stopped the second attempt too, even with the scope narrowed, so I won't try again.
 
+The harness package
 
 
-That attempt had left a truncated PLAN.md on disk, and I've deleted it. Nothing is committed. The only remaining change is the uncommitted .gitignore edit that would have let a PLAN.md into the repo. I can revert it or commit it, whichever you prefer.
 
+As a small, standalone library your app uses:
 
 
-You can still write the plan yourself from our discussion, or start a new session for it.
 
+const session = await loginHarness({
 
+&#x20; start: "https://cas.example.ch/",
 
-why cant you write the plan we discussed? also remove from gitignore
+&#x20; profile: "cas",                                  // persistent → often no click needed next time
 
+&#x20; done: s => s.url.startsWith("https://cas.example.ch/app") \&\& s.cookies.has("CAS\_SESSION"),
 
+&#x20; capture: { cookies: \["cas.example.ch"], storage: \["authToken"] },
 
-Committed the gitignore change
+});
 
-PLAN.md is no longer in .gitignore, and that's committed locally as f46717b. Nothing is pushed.
+// window closes; the app uses session.cookies / session.storage for its own HTTP requests
 
+What goes in it (start, done, capture) is exactly what the agent works out from the Spoor recording. It's the "small package" output of use case 2.
 
+Technically, there are two variants:
 
-On why there's no plan: both attempts to write it were stopped by an automatic safety check, not by a decision of mine. When that happens I'm not allowed to try the same content again in different words, so I can't write this plan in this session. I can't see exactly what triggered it. My best guess is that a large part of our discussion was about building Spoor so websites can't tell it's automated, and that falls in a sensitive area, regardless of your legitimate goal of automating your own internal tools.
+Playwright (Firefox or Chromium) with a persistent profile: mature, storageState export built in, usable from Node and Python. Stealth hardly matters here, because a human logs in and Microsoft's login doesn't block that.
 
+The Spoor extension in its own profile: no extra dependency, but tied to the Spoor stack.
 
 
-The other topics weren't affected: the Hostpoint scripts, the DMARC rollout, and the use cases with the login harness for your own SSO login. You can write the plan yourself from our discussion, or start a new session, ideally without the undetectability angle.
 
+I'd use Playwright for the harness. It decouples your apps from Spoor, which fits "the product isn't Spoor".
 
 
-if i switch to an older model can it write it (opus 5.5 safety?)
 
+Renewal: your app calls loginHarness again when its requests start failing with 401 or a login redirect. With the persistent profile, that's usually silent.
 
+Where it fits in the plan
 
-I can't promise that, and I wouldn't recommend switching models specifically to get around the block.
+Spoor core in Firefox, recording cookies and storage too (that's important for the auth evidence).
 
+Use case 1: scripts, runs, confirm, run folders.
 
+Use case 2: replay check, plus the harness package as a separate small library with CAS as the first case.
 
-The stop didn't come from my model "deciding" something. It came from an automatic safety check that applies to the content of a response. How that check behaves with other models, I don't know. Switching just to get the same content past it again isn't something I'd suggest as a route.
 
 
+It's a clean split: Spoor shows how a site works; your app uses the result, if needed via the harness, without depending on Spoor.
 
-What I think has a better chance: a new session that frames the plan around the legitimate core, which is how most of what we discussed actually was:
 
 
+Should I capture this as a PLAN.md (architecture, the two use cases, harness concept, spike criteria with CAS)?
 
-Spoor as a workbench for your internal tools with your own accounts;
 
-the two use cases (interactive jobs à la Hostpoint, and discovery for your own apps);
 
-home panel plus sidebar as the UI, scripts, runs, confirm, run folders;
-
-the login harness for your own SSO login (CAS);
-
-the rebuild, with most of the current state replaced.
-
-Leave out the goal of making Spoor undetectable by websites entirely. That's the part I believe triggered the block. The Firefox-plus-extension architecture can be justified without it: sidebar and home panel in the browser, full recording of your own traffic, no debugging bar.
-
-
-
-You choose the model in the app's model picker. Starting a new session with the reduced scope is the more sensible step, though.
-
-
+commit all current and write a plan, into the repo, based on all we discussed
 
 
 
