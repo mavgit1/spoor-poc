@@ -1,7 +1,6 @@
 # Plan: Spoor as a Firefox extension workbench
 
-**Status:** not started — spike first  
-**Branch:** `v0.6-session-runtime` (current Chromium/CDP codebase, 4 local commits)  
+**Status:** phases 0–4 built on branch `v0.7-firefox` (see "Build status" at the end)  
 **Context:** [discussion.md](discussion.md) has the full conversation that led here
 
 ---
@@ -235,3 +234,56 @@ Delete: all Chromium/CDP code, chromiumoxide dependency, spoor-app (Tauri).
 Phase 0 is the gate. If the spike fails on a critical point (e.g.
 `content.fetch()` doesn't send cookies, or native messaging is broken on
 Windows), we re-evaluate before committing to the rebuild.
+
+## Build status (2026-10-02)
+
+Built in TypeScript on branch `v0.7-firefox`, replacing the Rust/CDP code and
+the Tauri app. Verified with `npm run e2e`: real headless Firefox 157, the
+extension, the native host and the service, against a fake app that logs in
+through a second host, OAuth-style. 43 checks.
+
+**Spike criteria (phase 0)**
+
+- [ ] Mozilla signs an unlisted add-on. `spoor sign` is ready and
+      `web-ext lint` passes, but it needs AMO API keys, so it hasn't been run.
+- [x] `content.fetch()` sends the page's cookies and Origin (e2e: CSRF write
+      through the page session; the server sees Origin and the session cookie)
+- [x] `filterResponseData` records bodies; webRequest sees content-script
+      requests with the right tabId (audit). Pacing is enforced in the
+      background through a gate every script `fetch` passes, not in
+      webRequest, so parallel fetches are paced without depending on
+      request attribution.
+- [ ] Native messaging on Windows: the registry entry and `.cmd` launcher are
+      written, but haven't run on Windows. Works on macOS.
+- [x] Per-site isolation: **containers**, in one Spoor Firefox profile. One
+      browser, one extension instance, one native connection, and the home
+      panel sees every site. Each container has its own cookies and storage.
+- [~] On a real site: not done yet. The fake-site e2e covers login across
+      hosts, recording with bodies, Set-Cookie and storage, and runs with
+      pacing, confirm, save, pause and stop.
+
+**Decisions taken while building**
+
+1. **Containers, not profiles** (see above). Switching to profiles later only
+   touches `containerFor` / `workerTab` in the background script.
+2. **Node 24, not Bun.** Node runs the TypeScript sources directly (type
+   stripping), so the service and CLI need no build step. A single
+   executable (Node SEA or `bun build --compile`) is still possible later.
+3. **Manifest V2, not V3.** In Firefox, MV2 is fully supported and gives a
+   persistent background page plus `tabs.executeScript({code})`, which runs
+   the agent's script strings in the content-script world. MV3's CSP forbids
+   that. Blocking webRequest and `filterResponseData` work in both.
+4. **The service owns runs and files; the extension executes.** The home panel
+   and sidebar call the same HTTP API as the agent, tunnelled over native
+   messaging (`api` calls). There is one source of truth, on disk.
+5. **Approvals only in the browser.** `spoor.confirm` can't be answered
+   through the API.
+
+**Next**
+
+- Sign the extension (`spoor sign`) and switch daily use to `spoor browser`
+- Spike on a real SSO site (CAS / Microsoft): recording, `spoor auth`,
+  `spoor replay --minimize`, harness
+- Try it on Windows
+- Later list: notifications for "login needed", auto-relogin, browser worker
+  on a VM, generated clients from the dossier

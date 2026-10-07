@@ -1,0 +1,4 @@
+#!/bin/sh
+# spoor CLI launcher: Node >= 24 runs the TypeScript sources directly.
+DIR="$(cd "$(dirname "$0")/.." && pwd -P)"
+exec node --no-warnings=ExperimentalWarning "$DIR/src/cli/main.ts" "$@"

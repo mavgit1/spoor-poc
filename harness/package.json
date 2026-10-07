@@ -1,0 +1,16 @@
+{
+  "name": "spoor-login-harness",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Open a real browser window for a human login, capture the session, close it. For apps that talk to sites without an API — no dependency on Spoor.",
+  "type": "module",
+  "main": "dist/index.js",
+  "types": "dist/index.d.ts",
+  "files": ["dist", "README.md"],
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "prepare": "tsc -p tsconfig.json"
+  },
+  "peerDependencies": { "playwright": ">=1.40" },
+  "engines": { "node": ">=20" }
+}

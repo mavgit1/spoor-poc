@@ -10,22 +10,21 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: actions/setup-node@v4
         with:
-          components: rustfmt, clippy
+          node-version: 24
+          cache: npm
 
-      - uses: Swatinem/rust-cache@v2
-        with:
-          workspaces: spoor
+      - run: npm ci
 
-      - name: Format
-        working-directory: spoor
-        run: cargo fmt --check
+      - name: Typecheck
+        run: npm run typecheck
 
-      - name: Test
-        working-directory: spoor
-        run: cargo test
+      - name: Unit tests
+        run: npm test
 
-      - name: Clippy
-        working-directory: spoor
-        run: cargo clippy --all-targets -- -D warnings
+      - name: Build extension and harness
+        run: npm run build
+
+      - name: Lint extension
+        run: npx web-ext lint --source-dir extension/dist --warnings-as-errors=false

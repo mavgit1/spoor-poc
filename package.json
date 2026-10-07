@@ -1,0 +1,33 @@
+{
+  "name": "spoor",
+  "version": "0.7.0",
+  "private": true,
+  "description": "Workbench for building internal webapps against sites with no API: Firefox extension + local service + CLI",
+  "type": "module",
+  "engines": {
+    "node": ">=24"
+  },
+  "bin": {
+    "spoor": "bin/spoor"
+  },
+  "scripts": {
+    "build": "node --no-warnings=ExperimentalWarning scripts/build-extension.ts && tsc -p harness/tsconfig.json",
+    "typecheck": "tsc -p tsconfig.json --noEmit && tsc -p extension/tsconfig.json --noEmit && tsc -p harness/tsconfig.json --noEmit",
+    "test": "node --test --no-warnings=ExperimentalWarning 'test/**/*.test.ts'",
+    "e2e": "node --no-warnings=ExperimentalWarning test/e2e/run.ts",
+    "check": "npm run typecheck && npm test",
+    "e2e:harness": "node --no-warnings=ExperimentalWarning test/e2e/harness.ts"
+  },
+  "dependencies": {
+    "ws": "^8.22.0"
+  },
+  "devDependencies": {
+    "@types/firefox-webext-browser": "^143.0.1",
+    "@types/node": "^24.19.1",
+    "@types/ws": "^8.18.2",
+    "esbuild": "^0.28.2",
+    "playwright": "^1.63.0",
+    "typescript": "^5.9.3",
+    "web-ext": "^10.7.0"
+  }
+}

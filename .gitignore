@@ -1,29 +1,22 @@
 # Secrets & local config
 .env
-openrouter.json
 
 # Reference clones & scratch
 tmp/
 
-# Local one-off scripts
-scripts/
+# Local site scripts, exports and backups (may contain account data)
+local/
+
+# Node
+node_modules/
+
+# Build output
+extension/dist/
+extension/signed/
+harness/dist/
 
 # Cursor rules & local IDE
 .cursor/
 
-# Rust build output
-/target
-spoor/target/
-spoor-app/src-tauri/target/
-
-# Desktop app frontend
-spoor-app/node_modules/
-spoor-app/build/
-spoor-app/.svelte-kit/
-spoor-app/dist/
-
 # macOS
 .DS_Store
-
-# Local site scripts, exports and backups (may contain account data)
-local/
