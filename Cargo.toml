@@ -1,3 +1,0 @@
-[workspace]
-resolver = "2"
-members = ["spoor", "spoor-app/src-tauri"]

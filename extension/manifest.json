@@ -1,0 +1,35 @@
+{
+  "manifest_version": 2,
+  "name": "Spoor",
+  "version": "0.7.0",
+  "description": "Personal workbench: run scripts in your logged-in site sessions, record traffic, approve writes.",
+  "browser_specific_settings": {
+    "gecko": {
+      "id": "spoor@mavgit1.local",
+      "strict_min_version": "140.0",
+      "data_collection_permissions": { "required": ["none"] }
+    }
+  },
+  "permissions": [
+    "<all_urls>",
+    "nativeMessaging",
+    "webRequest",
+    "webRequestBlocking",
+    "webNavigation",
+    "cookies",
+    "contextualIdentities",
+    "tabs",
+    "tabHide",
+    "storage",
+    "notifications"
+  ],
+  "background": { "scripts": ["background.js"], "persistent": true },
+  "browser_action": { "default_title": "Spoor home", "default_icon": "icon.svg" },
+  "sidebar_action": {
+    "default_title": "Spoor",
+    "default_panel": "sidebar.html",
+    "default_icon": "icon.svg",
+    "open_at_install": true
+  },
+  "icons": { "48": "icon.svg", "96": "icon.svg" }
+}
