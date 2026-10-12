@@ -7,10 +7,11 @@ import { ago, api, bridgeBanner, connect, h, mount, parseArgs, pill, pretty, sta
 type Tab = "overview" | "scripts" | "runs" | "recordings";
 
 interface SiteDetail {
-  site: { name: string; url: string; check?: string; min_gap_ms?: number };
+  site: { name: string; url: string; check?: string; min_gap_ms?: number; keepalive_mins?: number };
   dir: string;
+  session: { state: string; checked_at?: string; changed_at?: string; error?: string };
   notes: string;
-  scripts: { name: string; bytes: number; modified: string; description?: string }[];
+  scripts: { name: string; bytes: number; modified: string; description?: string; action?: { writes?: boolean; params?: Record<string, { type: string; description?: string }>; required?: string[] }; action_error?: string }[];
   runs: { id: string; script: string; status: string; started: string; duration_ms?: number; requests?: number; error?: string; files?: string[]; args: unknown }[];
   recordings: { id: string; started: string; stopped?: string; flows: number }[];
   dossier: string[];
@@ -145,15 +146,43 @@ function tabs(): HTMLElement {
   return h("div", { class: "tabs" }, t("overview", "Overview"), t("scripts", `Scripts (${detail!.scripts.length})`), t("runs", "Runs"), t("recordings", `Recordings (${detail!.recordings.length})`));
 }
 
+function sessionCard(d: SiteDetail): HTMLElement {
+  const name = d.site.name;
+  const st = d.session;
+  const kind = st.state === "logged_in" ? "good" : st.state === "logged_out" ? "bad" : "";
+  const clear = (cache: boolean) => act(async () => {
+    const what = `Log ${name} out? This removes every cookie and all storage in its container${cache ? ", and Firefox's HTTP cache (all sites)" : ""}. You'll have to log in again.`;
+    if (!confirm(what)) return;
+    await api("POST", `/sites/${name}/session/clear`, { cache });
+    await loadDetail();
+  }, "Session cleared");
+  return h("section", { class: "card" },
+    h("div", { class: "row" },
+      h("b", { class: "grow" }, "Session"),
+      pill(st.state.replace("_", " "), kind),
+      st.checked_at ? h("span", { class: "muted small" }, `checked ${ago(st.checked_at)}`) : null,
+    ),
+    st.error ? h("div", { class: "small bad-text" }, st.error) : null,
+    !d.site.check ? h("div", { class: "muted small" }, "No check script: Spoor can't tell whether you're logged in. Add one with `spoor site add " + name + " <url> --check <script>`.") : null,
+    h("div", { class: "row wrap" },
+      h("button", { class: "primary", onclick: () => { notice = "Log in in the tab Spoor brought forward; this updates when you're done."; render(); void act(async () => { const r = await api("POST", `/sites/${name}/login`, { timeout_secs: 900 }); await loadDetail(); notice = r.logged_in ? "Logged in ✓" : r.check_error ?? "Not logged in"; }); } }, "Log in"),
+      h("button", { onclick: () => act(async () => { const s = await api("GET", `/sites/${name}/status`); await loadDetail(); notice = s.check ? (s.logged_in ? "Logged in ✓" : `Not logged in${s.check_error ? `: ${s.check_error}` : ""}`) : "No check script set for this site"; }) }, "Check"),
+      h("button", { class: "danger", onclick: () => clear(false) }, "Clear session…"),
+      h("button", { class: "link danger", onclick: () => clear(true) }, "…and cache"),
+    ),
+    h("div", { class: "muted small" }, d.site.keepalive_mins ? `Keepalive: checked every ${d.site.keepalive_mins} min while Firefox runs; you get a notification when the login lapses.` : "Keepalive off (spoor site add … --keepalive-mins <n>)."),
+  );
+}
+
 function overview(d: SiteDetail): HTMLElement {
   const rec = state!.recordings[d.site.name];
   return h("div", { class: "stack" },
+    sessionCard(d),
     h("div", { class: "row wrap" },
       h("button", { class: "primary", onclick: () => ui({ ui: "open", site: d.site.name, url: d.site.url }) }, "Open site"),
       rec
         ? h("button", { class: "danger", onclick: () => act(() => api("POST", `/sites/${d.site.name}/record/stop`).then(loadDetail), "Recording saved") }, `Stop recording (${rec.flows})`)
         : h("button", { onclick: () => act(() => api("POST", `/sites/${d.site.name}/record/start`)) }, "Record"),
-      h("button", { onclick: () => act(async () => { const st = await api("GET", `/sites/${d.site.name}/status`); notice = st.check ? (st.logged_in ? "Logged in ✓" : `Not logged in${st.check_error ? `: ${st.check_error}` : ""}`) : "No check script set for this site"; }) }, "Check login"),
       h("button", { onclick: () => act(() => api("POST", `/sites/${d.site.name}/stop`), "Stopped") }, "Kill switch"),
     ),
     h("dl", { class: "facts" },
@@ -161,6 +190,7 @@ function overview(d: SiteDetail): HTMLElement {
       h("dt", null, "Folder"), h("dd", null, h("code", null, d.dir)),
       h("dt", null, "Pacing"), h("dd", null, `${d.site.min_gap_ms ?? 1000} ms between requests`),
       h("dt", null, "Check script"), h("dd", null, d.site.check ?? "—"),
+      h("dt", null, "Downloads"), h("dd", null, "run folder → files/"),
       h("dt", null, "Open tabs"), h("dd", null, d.browser ? String(d.browser.open_tabs) : "—"),
       h("dt", null, "Dossier"), h("dd", null, d.dossier.length ? d.dossier.join(", ") : "—"),
     ),
@@ -173,7 +203,8 @@ function overview(d: SiteDetail): HTMLElement {
 function scriptsView(d: SiteDetail): HTMLElement {
   const list = h("ul", { class: "list" },
     d.scripts.map(s => h("li", { class: view.script === s.name ? "active" : "", onclick: () => act(() => openScript(s.name)) },
-      h("b", null, s.name), h("div", { class: "muted small" }, s.description ?? "", " · ", ago(s.modified)))),
+      h("div", { class: "row" }, h("b", { class: "grow" }, s.name), s.action ? pill(s.action.writes ? "action · writes" : "action", s.action.writes ? "warn" : "good") : null, s.action_error ? pill("broken action", "bad") : null),
+      h("div", { class: "muted small" }, s.description ?? "", " · ", ago(s.modified)))),
     h("li", { onclick: () => { Object.assign(view, { script: "", scriptCode: "// what this script does\n\nreturn document.title;\n", newScript: true, scriptDirty: true }); render(); } }, h("span", { class: "muted" }, "+ New script")),
   );
   if (view.script === undefined) return h("div", { class: "split" }, list, h("p", { class: "muted" }, "Pick a script. Scripts are the body of an async function: `args`, `fetch` (the page's) and `spoor` are in scope."));
@@ -185,10 +216,19 @@ function scriptsView(d: SiteDetail): HTMLElement {
     h("div", { class: "row" },
       h("button", { disabled: !view.scriptDirty, onclick: () => act(async () => { await api("PUT", `/sites/${d.site.name}/scripts/${view.script}`, { code: view.scriptCode }); view.scriptDirty = false; view.newScript = false; await loadDetail(); }, "Saved") }, "Save"),
     ),
+    (() => {
+      const info = d.scripts.find(x => x.name === view.script);
+      if (info?.action_error) return h("div", { class: "banner bad" }, info.action_error);
+      if (!info?.action?.params) return null;
+      return h("div", { class: "muted small" }, "Parameters: ", Object.entries(info.action.params).map(([k, p]) => `${k}${info.action!.required?.includes(k) ? "" : "?"} (${p.type})${p.description ? ` ${p.description}` : ""}`).join(" · "));
+    })(),
     h("label", { class: "muted small" }, "Arguments: one key=value per line, or a JSON object"),
     h("textarea", { "data-key": "args", class: "args", placeholder: "domain=example.ch\ndryRun=true", value: view.args, oninput: (e: Event) => (view.args = (e.target as HTMLTextAreaElement).value) }),
     h("button", { class: "primary", disabled: view.scriptDirty || view.newScript, onclick: () => act(async () => {
-      const meta = await api("POST", `/sites/${d.site.name}/runs`, { script: view.script, args: parseArgs(view.args) });
+      const isAction = !!d.scripts.find(x => x.name === view.script)?.action;
+      const meta = isAction
+        ? await api("POST", `/sites/${d.site.name}/actions/${view.script}`, { args: parseArgs(view.args) })
+        : await api("POST", `/sites/${d.site.name}/runs`, { script: view.script, args: parseArgs(view.args) });
       Object.assign(view, { tab: "runs", run: meta.id, file: null });
       await loadDetail();
       await loadRun();
@@ -223,12 +263,12 @@ function runsView(d: SiteDetail): HTMLElement {
   const detailEl = h("div", { class: "stack" },
     h("div", { class: "row" }, pill(meta.status, statusKind(meta.status)), h("b", { class: "grow" }, `${meta.script} · ${meta.id}`),
       active ? h("button", { class: "danger", onclick: () => act(() => api("POST", `/sites/${d.site.name}/runs/${meta.id}/stop`)) }, "Stop") : null,
-      !active && meta.script !== "(inline)" ? h("button", { onclick: () => act(async () => { const m = await api("POST", `/sites/${d.site.name}/runs`, { script: meta.script, args: meta.args }); view.run = m.id; await loadDetail(); await loadRun(); }) }, "Run again") : null,
+      !active && meta.script !== "(inline)" ? h("button", { onclick: () => act(async () => { const m = await api("POST", meta.action ? `/sites/${d.site.name}/actions/${meta.script}` : `/sites/${d.site.name}/runs`, { script: meta.script, args: meta.args }); view.run = m.id; await loadDetail(); await loadRun(); }) }, "Run again") : null,
     ),
     h("div", { class: "muted small" }, `args ${JSON.stringify(meta.args)} · ${meta.requests ?? 0} requests${meta.duration_ms ? ` · ${(meta.duration_ms / 1000).toFixed(1)} s` : ""}`),
     h("pre", { class: "log tall", "data-key": "runlog" }, events.map(eventLine).join("\n")),
     h("div", { class: "row wrap" }, h("span", { class: "muted small" }, "Files:"),
-      files.map(f => h("button", { class: "link", onclick: () => act(async () => { const r = await api("GET", `/sites/${d.site.name}/runs/${meta.id}/files/${f.name}`); view.file = { name: f.name, text: r.text ?? (r.too_large ? `(${r.bytes} bytes — too large to show here)` : `(binary, ${r.bytes} bytes)`) }; }) }, `${f.name} (${f.bytes})`))),
+      files.map(f => h("button", { class: "link", onclick: () => act(async () => { const r = await api("GET", `/sites/${d.site.name}/runs/${meta.id}/files/${encodeURIComponent(f.name)}`); view.file = { name: f.name, text: r.text ?? (r.too_large ? `(${r.bytes} bytes — too large to show here)` : `(binary, ${r.bytes} bytes)`) }; }) }, `${f.name} (${f.bytes})`))),
     view.file ? h("div", { class: "stack" }, h("b", null, view.file.name), h("pre", { class: "log tall" }, view.file.text)) : null,
   );
   return h("div", { class: "split" }, list, detailEl);

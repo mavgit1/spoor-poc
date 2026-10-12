@@ -8,7 +8,11 @@
 //   app /            → page with a CSRF token and an item id in hidden inputs,
 //                      and a JWT in localStorage
 //   app /api/items   → JSON, needs the session cookie; POST needs the CSRF header
+//   app /files/report.bin → a 3 MB attachment, needs the session cookie
+//   idp /api/whoami  → JSON, needs the idp's own cookie (for spoor.tab)
 //
+// APPSESSION is a session cookie (no expiry), like most real logins: it only
+// survives a browser restart through session restore.
 // It records the arrival time and headers of every API request so the test
 // can check pacing and that requests carry the page's cookies and Origin.
 
@@ -31,6 +35,8 @@ export interface FakeSite {
 }
 
 const CSRF = "csrf-7f3a9c";
+/** 3 MB, a recognisable pattern so the test can check the bytes. */
+export const REPORT = Buffer.alloc(3 * 1024 * 1024, "spoor-report-");
 const SESSION = "sess-5d2e81";
 
 function jwt(): string {
@@ -73,7 +79,7 @@ export async function startFakeSite(appPort = 7600, idpPort = 7601): Promise<Fak
     }
     if (url.pathname === "/cb") {
       if (url.searchParams.get("code") !== "authcode-123") return res.writeHead(400).end("bad code");
-      res.writeHead(302, { location: "/", "set-cookie": `APPSESSION=${SESSION}; Path=/; HttpOnly; Max-Age=3600; SameSite=Lax` });
+      res.writeHead(302, { location: "/", "set-cookie": `APPSESSION=${SESSION}; Path=/; HttpOnly; SameSite=Lax` });
       return res.end();
     }
     if (url.pathname === "/" || url.pathname === "/index.html") {
@@ -98,6 +104,19 @@ export async function startFakeSite(appPort = 7600, idpPort = 7601): Promise<Fak
       }
       return res.writeHead(200, { "content-type": "application/json" }).end(JSON.stringify({ items, at: Date.now() }));
     }
+    if (url.pathname === "/go") return res.writeHead(302, { location: "/docs/index.html" }).end();
+    if (url.pathname === "/out") return res.writeHead(302, { location: `${idp}/api/whoami` }).end();
+    if (url.pathname === "/docs/index.html") return res.writeHead(200, { "content-type": "text/html" }).end('<a id="l" href="file.txt">relative</a>');
+    if (url.pathname === "/files/needs-referer.bin") {
+      if (req.headers.referer !== `${idp}/`) return res.writeHead(403).end("referer");
+      return res.writeHead(200, { "content-type": "application/octet-stream" }).end("ok-referer");
+    }
+    if (url.pathname === "/files/report.bin") {
+      hits.push({ at: Date.now(), method: req.method!, path: url.pathname, cookie: req.headers.cookie });
+      if (!authed) return res.writeHead(401).end("login");
+      res.writeHead(200, { "content-type": "application/octet-stream", "content-length": String(REPORT.length), "content-disposition": 'attachment; filename="Report 1.bin"' });
+      return res.end(REPORT);
+    }
     if (url.pathname.startsWith("/api/slow")) {
       await new Promise(r => setTimeout(r, 50));
       return res.writeHead(200, { "content-type": "application/json" }).end(`{"path":${JSON.stringify(url.pathname)}}`);
@@ -118,6 +137,10 @@ export async function startFakeSite(appPort = 7600, idpPort = 7601): Promise<Fak
 <form method="post" action="/login"><input name="login" value="tester"><input type="password" name="passwd" value="hunter2-secret">
 <input type="hidden" name="redirect_uri" value="${redirect}"><input type="hidden" name="state" value="${url.searchParams.get("state")}"></form>
 <script>setTimeout(() => document.forms[0].submit(), 300);</script>`);
+    }
+    if (url.pathname === "/api/whoami") {
+      if (cookies(req).IDPSESSION !== "idp-1") return res.writeHead(401, { "content-type": "application/json" }).end('{"error":"login"}');
+      return res.writeHead(200, { "content-type": "application/json" }).end('{"user":"tester"}');
     }
     if (url.pathname === "/login" && req.method === "POST") {
       const form = new URLSearchParams(await body(req));

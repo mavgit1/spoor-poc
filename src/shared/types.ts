@@ -9,6 +9,47 @@ export interface Site {
   check?: string;
   /** Minimum milliseconds between requests a run makes (default 1000). */
   min_gap_ms?: number;
+  /**
+   * Run the check script every this many minutes while Spoor's Firefox is
+   * up: keeps the site's server session alive, and notices (and tells you)
+   * when the login has expired. Off when absent.
+   */
+  keepalive_mins?: number;
+}
+
+/** What Spoor last saw of a site's login (`sites/<site>/session.json`). */
+export interface SessionState {
+  state: "logged_in" | "logged_out" | "unknown";
+  /** When the check script last ran. */
+  checked_at?: string;
+  /** When `state` last changed. */
+  changed_at?: string;
+  error?: string;
+}
+
+// ---------------------------------------------------------------- actions
+
+/** One parameter of an action. A subset of JSON Schema, so it maps 1:1 to MCP. */
+export interface ParamSpec {
+  type: "string" | "number" | "integer" | "boolean" | "array" | "object";
+  description?: string;
+  enum?: unknown[];
+  default?: unknown;
+}
+
+/**
+ * A script becomes an action when it starts with a `/* spoor-action {…} *\/`
+ * block. Actions are what a web app, the home panel and MCP call by name.
+ */
+export interface ActionSpec {
+  description?: string;
+  params?: Record<string, ParamSpec>;
+  required?: string[];
+  /** True if it changes data on the site. Informational; writes still go through spoor.confirm. */
+  writes?: boolean;
+  /** Check the login first (default true when the site has a check script). */
+  login?: boolean;
+  timeout_secs?: number;
 }
 
 export interface SiteEntry extends Site {
@@ -97,8 +138,11 @@ export interface RunMeta {
   requests?: number;
   error?: string;
   progress?: Progress;
-  /** Files written with spoor.save(). */
+  /** Files written with spoor.save() and spoor.download(). */
   files?: string[];
+  /** Started as an action (validated args). */
+  action?: boolean;
+  writes?: boolean;
 }
 
 export interface Progress {
@@ -114,7 +158,7 @@ export type RunEvent = { n: number; ts: string } & (
   | { type: "progress"; progress: Progress }
   | { type: "confirm"; confirm_id: string; message: string; detail?: unknown }
   | { type: "confirmed"; confirm_id: string; approved: boolean }
-  | { type: "saved"; file: string; bytes: number }
+  | { type: "saved"; file: string; bytes: number; source?: string }
   | { type: "result"; ok: boolean; result?: unknown; error?: string }
 );
 

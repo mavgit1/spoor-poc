@@ -1,4 +1,4 @@
-// Bundle the extension into extension/dist (what web-ext runs and signs).
+// Bundle the extension into extension/dist (`spoor browser` packs it into the profile).
 
 import { build } from "esbuild";
 import { cpSync, mkdirSync, rmSync } from "node:fs";

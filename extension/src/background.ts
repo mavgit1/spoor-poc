@@ -4,7 +4,10 @@
 // - one Firefox container per site: its own cookie store, so each site keeps
 //   its own login; the human logs in by hand in a tab of that container
 // - one hidden worker tab per site where runs execute, as content scripts
-//   using content.fetch (requests carry the page's cookies and origin)
+//   using content.fetch (requests carry the page's cookies and origin); a run
+//   can open more hidden tabs in the same container for other origins
+//   (spoor.tab) and download files straight to disk (spoor.download)
+// - sessions: clearing a site's container, bringing a login tab forward
 // - pacing and pause/stop through a gate every script request passes, an
 //   audit of every request the worker tab makes (webRequest)
 // - recording: every request in the site's container, with headers, cookies,
@@ -14,6 +17,7 @@
 
 import { ChunkAssembler, isChunk, RpcPeer } from "../../src/shared/rpc.ts";
 import type { Body, BridgeMessage, CookieInfo, ExecParams, Flow, Progress, RunDone, RunEventInput, RunStatus, SiteBrowserState, StorageSnapshot } from "../../src/shared/types.ts";
+import { safeRelPath } from "../../src/shared/relpath.ts";
 import { buildWrapper } from "./wrapper.ts";
 import { redactBody } from "./redact.ts";
 
@@ -49,6 +53,10 @@ interface Run {
   log: { level: string; text: string }[];
   resumeWaiters: (() => void)[];
   timer?: ReturnType<typeof setTimeout>;
+  /** Extra hidden tabs opened with spoor.tab(), same container. */
+  auxTabs: number[];
+  /** spoor.download() ids still in progress. */
+  downloads: Set<number>;
 }
 
 interface Recording {
@@ -144,6 +152,8 @@ function runEvent(run: Run, ev: RunEventInput): void {
 
 function onServiceEvent(name: string, data: any): void {
   if (name === "changed") broadcast({ changed: data?.site ?? null });
+  if (name === "background") void toBackground();
+  if (name === "notify") notify(data);
   if (name === "host.error") {
     state.bridgeError = data?.error;
     broadcast();
@@ -241,16 +251,45 @@ async function workerTab(site: string, url: string): Promise<number> {
     state.workers.delete(site);
   }
   const since = Date.now();
+  const tab = await hiddenTab(storeId, url);
+  state.workers.set(site, tab);
+  await waitForLoad(tab, since);
+  broadcast();
+  return tab;
+}
+
+/** A hidden tab in a container, marked so a restored session doesn't bring it back. */
+const createdThisSession = new Set<number>();
+/** Main-frame URLs each hidden tab committed, in order (spoor.tab(...).urls()). */
+const tabHistory = new Map<number, string[]>();
+
+browser.webNavigation.onCommitted.addListener(d => {
+  if (d.frameId === 0) tabHistory.get(d.tabId)?.push(d.url);
+});
+
+async function hiddenTab(storeId: string, url: string): Promise<number> {
   const tab = await browser.tabs.create({ url, cookieStoreId: storeId, active: false });
-  state.workers.set(site, tab.id!);
+  createdThisSession.add(tab.id!);
+  tabHistory.set(tab.id!, []);
+  await browser.sessions.setTabValue(tab.id!, "spoor", "worker").catch(() => {});
   try {
     await browser.tabs.hide(tab.id!);
   } catch (e) {
     console.warn("could not hide the worker tab", e);
   }
-  await waitForLoad(tab.id!, since);
-  broadcast();
   return tab.id!;
+}
+
+/**
+ * Firefox restores the last session (that keeps session cookies alive), which
+ * would bring back old worker tabs as visible tabs. Close those.
+ */
+async function sweepRestoredWorkers(): Promise<void> {
+  for (const t of await browser.tabs.query({})) {
+    if (t.id === undefined || createdThisSession.has(t.id)) continue;
+    const mark = await browser.sessions.getTabValue(t.id, "spoor").catch(() => undefined);
+    if (mark === "worker") await browser.tabs.remove(t.id).catch(() => {});
+  }
 }
 
 // ------------------------------------------------------------------ runs
@@ -270,6 +309,8 @@ async function exec(p: ExecParams): Promise<{ accepted: true }> {
     gateChain: Promise.resolve(),
     log: [],
     resumeWaiters: [],
+    auxTabs: [],
+    downloads: new Set(),
   };
   state.runs.set(run.id, run);
   run.timer = setTimeout(() => void stopRun(run, "error", `timed out after ${Math.round(p.timeout_ms / 1000)} s`), p.timeout_ms);
@@ -311,6 +352,8 @@ async function finishRun(run: Run, out: { ok: boolean; status: RunStatus; result
     }, LINGER_MS);
   }
   clearTimeout(run.timer);
+  for (const id of run.downloads) void browser.downloads.cancel(id).catch(() => {});
+  if (run.auxTabs.length) setTimeout(() => void browser.tabs.remove(run.auxTabs).catch(() => {}), LINGER_MS);
   for (const c of state.confirms.values()) {
     if (c.run_id === run.id) {
       state.confirms.delete(c.id);
@@ -402,6 +445,38 @@ async function onScriptMessage(msg: any, run: Run): Promise<unknown> {
     case "save":
       if (!peer) throw new Error("not connected to the Spoor service");
       return peer.call("run.save", { run_id: run.id, name: d.name, data: d.data, encoding: d.encoding }, 120_000);
+    case "download":
+      return download(run, d);
+    case "state":
+      if (!peer) throw new Error("not connected to the Spoor service");
+      return peer.call("run.state", { run_id: run.id, op: d.op, key: d.key, value: d.value });
+    case "tab.open": {
+      const storeId = await containerFor(run.site);
+      const since = Date.now();
+      const tab = await hiddenTab(storeId, String(d.url));
+      run.auxTabs.push(tab);
+      await waitForLoad(tab, since);
+      return { tab };
+    }
+    case "tab.fetch": {
+      const tab = auxTab(run, d.tab);
+      await gate(run);
+      const [res] = await browser.tabs.executeScript(tab, { code: TAB_FETCH(String(d.url), d.init ?? {}) });
+      return JSON.parse(String(res));
+    }
+    case "tab.eval": {
+      const tab = auxTab(run, d.tab);
+      const [res] = await browser.tabs.executeScript(tab, { code: `(async (args) => {\n${String(d.code)}\n})(${JSON.stringify(d.args ?? null)}).then(r => r === undefined ? null : JSON.parse(JSON.stringify(r)))` });
+      return res;
+    }
+    case "tab.urls":
+      return tabHistory.get(auxTab(run, d.tab)) ?? [];
+    case "tab.close": {
+      const tab = auxTab(run, d.tab);
+      run.auxTabs = run.auxTabs.filter(t => t !== tab);
+      await browser.tabs.remove(tab).catch(() => {});
+      return true;
+    }
     case "confirm":
       return { approved: await askConfirm(run, String(d.message ?? "Continue?"), d.detail) };
     case "done":
@@ -409,6 +484,143 @@ async function onScriptMessage(msg: any, run: Run): Promise<unknown> {
       return true;
   }
   throw new Error(`unknown message ${msg.kind}`);
+}
+
+function auxTab(run: Run, id: unknown): number {
+  const tab = Number(id);
+  if (!run.auxTabs.includes(tab)) throw new Error("that tab is closed or not this run's");
+  return tab;
+}
+
+/** Runs in an aux tab: the page's own fetch there, the response handed back as plain data. */
+const TAB_FETCH = (url: string, init: unknown) => `(async () => {
+  // Relative to where the tab is now (after redirects), not where it was opened.
+  const r = await content.fetch(new URL(${JSON.stringify(url)}, location.href).href, ${JSON.stringify(init)});
+  // Copy first: the page's buffer can't be sliced from here.
+  const u8 = new Uint8Array(structuredClone(await r.arrayBuffer()));
+  let s = "";
+  for (let i = 0; i < u8.length; i += 0x8000) s += String.fromCharCode(...u8.subarray(i, i + 0x8000));
+  // As a JSON string: objects built here don't survive being handed back as they are.
+  const headers = [];
+  r.headers.forEach((v, k) => headers.push([String(k), String(v)]));
+  return JSON.stringify({ status: r.status, statusText: r.statusText, url: r.url, redirected: r.redirected, headers, body: btoa(s) });
+})()`;
+
+/**
+ * spoor.download(): Firefox's download manager fetches the file inside the
+ * site's container (its cookies) and writes it straight to disk; nothing
+ * passes through memory or the bridge. The service then moves it from the
+ * download folder into the run's files/.
+ */
+async function download(run: Run, d: { url: string; path?: string; dir?: string; method?: string; headers?: Record<string, string>; body?: string; referer?: string }): Promise<unknown> {
+  if (!peer) throw new Error("not connected to the Spoor service");
+  const rel = d.path ? safeRelPath(d.path) : undefined;
+  if (d.path && !rel) throw new Error(`invalid download path ${JSON.stringify(d.path)}`);
+  await gate(run);
+  const storeId = await containerFor(run.site);
+  const opts: browser.downloads._DownloadOptions & { cookieStoreId?: string } = {
+    url: d.url,
+    saveAs: false,
+    conflictAction: rel ? "overwrite" : "uniquify",
+    cookieStoreId: storeId,
+  };
+  // Below Firefox's download folder; the service moves it out right after.
+  if (rel) opts.filename = `${run.site}/${run.id}/${rel}`;
+  if (d.method) opts.method = d.method as "GET" | "POST";
+  if (d.headers) opts.headers = Object.entries(d.headers).map(([name, value]) => ({ name, value: String(value) }));
+  if (d.body !== undefined) opts.body = d.body;
+  // Firefox names the file after the URL; the server's Content-Disposition
+  // name (ILIAS: every URL is ilias.php) comes from the response headers.
+  const named: DownloadName = { requestIds: new Set(), referer: d.referer };
+  downloadNames.set(d.url, named);
+  let id: number;
+  try {
+    id = await browser.downloads.download(opts);
+  } catch (e) {
+    downloadNames.delete(d.url);
+    throw e;
+  }
+  run.downloads.add(id);
+  run.requests++;
+  let item: browser.downloads.DownloadItem | undefined;
+  try {
+    for (;;) {
+      [item] = await browser.downloads.search({ id });
+      if (!item) throw new Error("the download disappeared");
+      if (item.state === "complete") break;
+      if (item.state === "interrupted") throw new Error(`download failed: ${item.error ?? "interrupted"} (${d.url})`);
+      if (!state.runs.has(run.id)) throw new Error("run stopped");
+      if (run.status === "paused" && !item.paused) await browser.downloads.pause(id).catch(() => {});
+      if (run.status !== "paused" && item.paused && item.canResume) await browser.downloads.resume(id).catch(() => {});
+      await new Promise(r => setTimeout(r, 250));
+    }
+  } catch (e) {
+    await browser.downloads.cancel(id).catch(() => {});
+    await browser.downloads.erase({ id }).catch(() => {});
+    emit("audit", { site: run.site, run: run.id, method: d.method ?? "GET", url: d.url, type: "download", error: errorText(e) });
+    throw e;
+  } finally {
+    run.downloads.delete(id);
+    if (downloadNames.get(d.url) === named) downloadNames.delete(d.url);
+  }
+  // Keep the file, drop the entry from the downloads list.
+  await browser.downloads.erase({ id }).catch(() => {});
+  emit("audit", { site: run.site, run: run.id, method: d.method ?? "GET", url: d.url, type: "download", bytes: item.fileSize, mime: item.mime });
+  const base = (named.disposition && dispositionName(named.disposition))?.replace(/[\\/]/g, "_") || item.filename.split(/[\\/]/).pop()!;
+  const path = rel ?? (d.dir ? `${d.dir}/${base}` : base);
+  const out = await peer.call<Record<string, unknown>>("run.adopt", { run_id: run.id, from: item.filename, path, url: d.url }, 120_000);
+  return { ...out, mime: item.mime || undefined };
+}
+
+interface DownloadName {
+  requestIds: Set<string>;
+  disposition?: string;
+  /** The download API can't set Referer; added to the request here instead. */
+  referer?: string;
+}
+
+/** Downloads in flight by URL; their requests (tabId -1) carry the file name. */
+const downloadNames = new Map<string, DownloadName>();
+
+browser.webRequest.onBeforeRequest.addListener(d => {
+  if (d.tabId === -1) downloadNames.get(d.url)?.requestIds.add(d.requestId);
+}, { urls: ["<all_urls>"] });
+
+browser.webRequest.onBeforeSendHeaders.addListener(d => {
+  if (d.tabId !== -1) return {};
+  for (const n of downloadNames.values()) {
+    if (!n.referer || !n.requestIds.has(d.requestId)) continue;
+    const headers = (d.requestHeaders ?? []).filter(h => h.name.toLowerCase() !== "referer");
+    headers.push({ name: "Referer", value: n.referer });
+    return { requestHeaders: headers };
+  }
+  return {};
+}, { urls: ["<all_urls>"] }, ["blocking", "requestHeaders"]);
+
+browser.webRequest.onHeadersReceived.addListener(d => {
+  if (d.tabId !== -1) return;
+  for (const n of downloadNames.values()) {
+    if (!n.requestIds.has(d.requestId)) continue;
+    const h = d.responseHeaders?.find(x => x.name.toLowerCase() === "content-disposition");
+    if (h?.value) n.disposition = h.value;
+  }
+}, { urls: ["<all_urls>"] }, ["responseHeaders"]);
+
+/** `attachment; filename="a b.zip"; filename*=UTF-8''a%20b.zip` → "a b.zip" (filename* wins). */
+export function dispositionName(v: string): string | undefined {
+  const star = /filename\*\s*=\s*([^;]+)/i.exec(v);
+  if (star) {
+    const raw = star[1]!.trim().replace(/^"|"$/g, "");
+    const m = /^[\w-]*'[^']*'(.*)$/.exec(raw);
+    try {
+      return decodeURIComponent(m ? m[1]! : raw);
+    } catch {
+      // fall through to filename=
+    }
+  }
+  const plain = /filename\s*=\s*(?:"([^"]*)"|([^;]+))/i.exec(v);
+  const name = (plain?.[1] ?? plain?.[2])?.trim();
+  return name || undefined;
 }
 
 function askConfirm(run: Run, message: string, detail: unknown): Promise<boolean> {
@@ -451,14 +663,21 @@ async function openSidebar(): Promise<void> {
 
 // ------------------------------------------------------------------ audit (worker tabs)
 
+/** The run whose script lives in this tab (its worker tab). */
 function runForTab(tabId: number): Run | undefined {
   for (const r of state.runs.values()) if (r.tabId === tabId) return r;
   return undefined;
 }
 
+/** The run using this tab, as worker or spoor.tab(). */
+function runUsingTab(tabId: number): Run | undefined {
+  for (const r of state.runs.values()) if (r.tabId === tabId || r.auxTabs.includes(tabId)) return r;
+  return undefined;
+}
+
 /** For the audit: the running run on this tab, or one that just finished there. */
 function auditRunForTab(tabId: number): Run | undefined {
-  return runForTab(tabId) ?? lingering.get(tabId);
+  return runUsingTab(tabId) ?? lingering.get(tabId);
 }
 
 browser.webRequest.onCompleted.addListener(d => {
@@ -483,6 +702,7 @@ browser.webNavigation.onCommitted.addListener(d => {
 });
 
 browser.tabs.onRemoved.addListener(tabId => {
+  tabHistory.delete(tabId);
   const run = runForTab(tabId);
   if (run) void finishRun(run, { ok: false, status: "error", error: "the worker tab was closed" });
   for (const [site, id] of state.workers) if (id === tabId) state.workers.delete(site);
@@ -607,7 +827,12 @@ browser.webRequest.onBeforeRequest.addListener(
         const end = () => {
           if (!pf.bodyPending) return;
           pf.bodyPending = false;
-          if (total > 0 || !pf.flow.response_body) {
+          const disposition = pf.flow.response_headers?.["content-disposition"] ?? "";
+          if (total === 0 && /^\s*attachment/i.test(disposition)) {
+            // The body went to the download manager, not through the filter.
+            const length = Number(pf.flow.response_headers?.["content-length"]);
+            pf.flow.response_body = { kind: "omitted", reason: "download", ...(Number.isFinite(length) && length > 0 ? { size: length } : {}) };
+          } else if (total > 0 || !pf.flow.response_body) {
             pf.flow.response_body = decodeBody(concat(chunks), pf.flow.response_headers?.["content-type"]?.split(";")[0], total);
           }
           maybeFinish(rec, d.requestId, pf);
@@ -815,7 +1040,61 @@ const handlers = {
   "record.stop": recordStop,
   "record.mark": recordMark,
   cookies: (p: { site: string; url?: string }) => cookiesFor(p.site, p.url),
+  "session.clear": clearSession,
+  "login.prompt": loginPrompt,
+  "login.tabs": async (p: { site: string }) => (await siteTabs(p.site)).filter(t => !t.hidden).map(t => ({ url: t.url, status: t.status })),
 };
+
+/**
+ * Forget everything the site's container holds: stop its runs, close its
+ * tabs, remove its cookies and storage, and remove the container itself (the
+ * next use creates a fresh one). `cache` also clears Firefox's HTTP cache,
+ * which is shared by all sites.
+ */
+async function clearSession(p: { site: string; cache?: boolean }): Promise<{ cookies_removed: number; cache: boolean }> {
+  if (state.recordings.has(p.site)) throw new Error(`${p.site} is being recorded; stop the recording first`);
+  for (const run of [...state.runs.values()]) if (run.site === p.site) await stopRun(run, "stopped", "session cleared");
+  const storeId = await containerFor(p.site);
+  const cookies = await cookiesFor(p.site);
+  state.workers.delete(p.site);
+  const tabs = await siteTabs(p.site);
+  await browser.tabs.remove(tabs.map(t => t.id!)).catch(() => {});
+  try {
+    await browser.browsingData.remove({ cookieStoreId: storeId } as browser.browsingData.RemovalOptions, { cookies: true, localStorage: true, indexedDB: true });
+  } catch (e) {
+    console.warn("browsingData.remove by container failed; removing the container still clears it", e);
+  }
+  await browser.contextualIdentities.remove(storeId);
+  state.containers.delete(p.site);
+  if (p.cache) await browser.browsingData.removeCache({});
+  broadcast();
+  return { cookies_removed: cookies.length, cache: !!p.cache };
+}
+
+/** Bring a visible tab of the site to the front at its start page, for the human to log in. */
+async function loginPrompt(p: { site: string; url: string }): Promise<{ tab: number }> {
+  const storeId = await containerFor(p.site);
+  const [existing] = (await siteTabs(p.site)).filter(t => !t.hidden);
+  const tab = existing
+    ? await browser.tabs.update(existing.id!, { url: p.url, active: true })
+    : await browser.tabs.create({ url: p.url, cookieStoreId: storeId, active: true });
+  if (tab.windowId !== undefined) await browser.windows.update(tab.windowId, { state: "normal", focused: true }).catch(() => {});
+  return { tab: tab.id! };
+}
+
+async function toBackground(): Promise<void> {
+  for (const w of await browser.windows.getAll({ windowTypes: ["normal"] })) {
+    if (w.id !== undefined) await browser.windows.update(w.id, { state: "minimized" }).catch(() => {});
+  }
+}
+
+const loginNotices = new Map<string, string>();
+
+function notify(p: { id: string; title: string; message: string; site?: string; clear_after_ms?: number }): void {
+  if (p.site) loginNotices.set(p.id, p.site);
+  void browser.notifications.create(p.id, { type: "basic", title: p.title, message: p.message });
+  if (p.clear_after_ms) setTimeout(() => void browser.notifications.clear(p.id), p.clear_after_ms);
+}
 
 // ------------------------------------------------------------------ messages from scripts and UI pages
 
@@ -922,7 +1201,17 @@ async function openHome(): Promise<void> {
 }
 
 browser.browserAction.onClicked.addListener(() => void openHome());
-browser.notifications.onClicked.addListener(() => void openSidebar());
+browser.notifications.onClicked.addListener(id => {
+  const site = loginNotices.get(id);
+  if (!site) return void openSidebar();
+  void (async () => {
+    const [tab] = (await siteTabs(site)).filter(t => !t.hidden);
+    if (tab?.id !== undefined) {
+      await browser.tabs.update(tab.id, { active: true });
+      if (tab.windowId !== undefined) await browser.windows.update(tab.windowId, { state: "normal", focused: true });
+    }
+  })();
+});
 browser.tabs.onActivated.addListener(() => broadcast({ tabChanged: true }));
 browser.tabs.onUpdated.addListener((_id, info) => {
   if (info.url) broadcast({ tabChanged: true });
@@ -933,6 +1222,9 @@ browser.tabs.onUpdated.addListener((_id, info) => {
 void (async () => {
   await loadContainers();
   connectBridge();
+  // Restored tabs can arrive a little after start.
+  await sweepRestoredWorkers();
+  setTimeout(() => void sweepRestoredWorkers(), 5000);
   const { openHomeAtStart = true } = await browser.storage.local.get("openHomeAtStart");
   if (openHomeAtStart) await openHome();
 })();

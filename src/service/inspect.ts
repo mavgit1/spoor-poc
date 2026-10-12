@@ -323,8 +323,22 @@ export interface Endpoint {
   statuses: number[];
   content_types: string[];
   query_params: string[];
+  /**
+   * For apps that dispatch on a query parameter (`index.php?cmd=…`): the
+   * values of those parameters that make this a separate endpoint.
+   */
+  dispatch?: Record<string, string>;
   request_body?: string;
   examples: number[];
+}
+
+/** Query parameters that name an operation rather than carry data. */
+const DISPATCH_PARAMS = /^(cmd|cmdclass|baseclass|action|op|operation|method|do|task|module|controller|func|function|service|mode|view)$/i;
+
+function dispatchOf(u: URL): Record<string, string> | undefined {
+  const out: Record<string, string> = {};
+  for (const [k, v] of u.searchParams) if (DISPATCH_PARAMS.test(k) && v && v.length <= 64 && !/\d{4,}/.test(v)) out[k] = v.toLowerCase();
+  return Object.keys(out).length ? out : undefined;
 }
 
 const STATIC_TYPES = new Set(["image", "font", "media", "stylesheet", "script", "imageset", "beacon", "ping", "csp_report"]);
@@ -360,10 +374,12 @@ export function endpoints(flows: Flow[]): Endpoint[] {
     if (u.protocol !== "http:" && u.protocol !== "https:") continue;
     const method = f.method ?? "GET";
     const path = pathTemplate(u.pathname);
-    const key = `${method} ${u.origin}${path}`;
+    const dispatch = dispatchOf(u);
+    const key = `${method} ${u.origin}${path} ${dispatch ? JSON.stringify(Object.entries(dispatch).sort()) : ""}`;
     let e = map.get(key);
     if (!e) {
       e = { method, origin: u.origin, path, count: 0, statuses: [], content_types: [], query_params: [], examples: [] };
+      if (dispatch) e.dispatch = dispatch;
       map.set(key, e);
     }
     e.count++;
@@ -374,5 +390,6 @@ export function endpoints(flows: Flow[]): Endpoint[] {
     e.request_body ??= bodyKind(f);
     if (e.examples.length < 3) e.examples.push(f.sequence);
   }
-  return [...map.values()].sort((a, b) => a.origin.localeCompare(b.origin) || a.path.localeCompare(b.path) || a.method.localeCompare(b.method));
+  const dispatchKey = (e: Endpoint) => (e.dispatch ? Object.entries(e.dispatch).sort().map(([k, v]) => `${k}=${v}`).join("&") : "");
+  return [...map.values()].sort((a, b) => a.origin.localeCompare(b.origin) || a.path.localeCompare(b.path) || dispatchKey(a).localeCompare(dispatchKey(b)) || a.method.localeCompare(b.method));
 }
