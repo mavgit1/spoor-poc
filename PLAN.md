@@ -1,6 +1,6 @@
 # Plan
 
-**Status (2026-10-11):** v0.8 on branch `v0.7-firefox`. The rebuild from
+**Status (2026-10-12):** v0.8 on `main`. The rebuild from
 Chromium/CDP/Rust to a Firefox extension, a local service and a CLI is done
 (history: [discussion.md](discussion.md), git log). This file holds what's
 next.
