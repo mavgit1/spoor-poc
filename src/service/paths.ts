@@ -4,18 +4,24 @@
 //     sites.json                 site registry (hand-editable)
 //     serve.json                 url + bearer token of the running service
 //     firefox/                   Spoor's Firefox profile (one container per site)
-//     spoor.xpi                  signed extension, installed into the profile
+//     downloads/                 Firefox's download folder; spoor.download() files
+//                                pass through here on their way into a run folder
 //     logs/service.log
 //     sites/<name>/
 //       notes.md                 shared notes: human and agent both edit
 //       scripts/<script>.js      script library
-//       runs/<id>/               run.json, events.jsonl, script.js, saved files
+//       runs/<id>/               run.json, events.jsonl, script.js, saved files,
+//                                files/ (spoor.download)
+//       state/<script>.json      spoor.state: what a script keeps between runs
+//       session.json             last known login state (check script)
 //       recordings/<id>/         meta.json, flows.jsonl, cookies.json, storage.json
 //       dossier/                 what `spoor dossier` and `spoor replay` write
 //       audit.jsonl              every request a run made
 
 import { homedir } from "node:os";
 import { join } from "node:path";
+
+export { safeRelPath } from "../shared/relpath.ts";
 
 export function spoorHome(): string {
   const env = process.env.SPOOR_HOME;
@@ -26,7 +32,7 @@ export const paths = {
   sites: () => join(spoorHome(), "sites.json"),
   serve: () => join(spoorHome(), "serve.json"),
   profile: () => join(spoorHome(), "firefox"),
-  xpi: () => join(spoorHome(), "spoor.xpi"),
+  downloads: () => join(spoorHome(), "downloads"),
   logs: () => join(spoorHome(), "logs"),
   site: (site: string) => join(spoorHome(), "sites", site),
   notes: (site: string) => join(spoorHome(), "sites", site, "notes.md"),
@@ -37,6 +43,8 @@ export const paths = {
   recording: (site: string, id: string) => join(spoorHome(), "sites", site, "recordings", id),
   dossier: (site: string) => join(spoorHome(), "sites", site, "dossier"),
   audit: (site: string) => join(spoorHome(), "sites", site, "audit.jsonl"),
+  session: (site: string) => join(spoorHome(), "sites", site, "session.json"),
+  state: (site: string, script: string) => join(spoorHome(), "sites", site, "state", `${script}.json`),
 };
 
 export const DEFAULT_PORT = 7517;

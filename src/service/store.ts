@@ -2,12 +2,13 @@
 // service all see the same thing; nothing is cached in memory that isn't also
 // on disk. See paths.ts for the layout.
 
-import { appendFileSync, existsSync, mkdirSync, readFileSync, readdirSync, rmSync, statSync, writeFileSync } from "node:fs";
-import { dirname, join } from "node:path";
+import { appendFileSync, copyFileSync, existsSync, mkdirSync, readFileSync, readdirSync, renameSync, rmSync, statSync, unlinkSync, writeFileSync } from "node:fs";
+import { dirname, join, relative, resolve, sep } from "node:path";
 import { gunzipSync } from "node:zlib";
 
-import type { Flow, RecordingMeta, RunEvent, RunEventInput, RunMeta, Site, SiteEntry } from "../shared/types.ts";
-import { DEFAULT_MIN_GAP_MS, isValidFileName, isValidName, isValidScriptName, nowIso, paths, spoorHome } from "./paths.ts";
+import type { ActionSpec, Flow, RecordingMeta, RunEvent, RunEventInput, RunMeta, SessionState, Site, SiteEntry } from "../shared/types.ts";
+import { parseAction } from "./actions.ts";
+import { DEFAULT_MIN_GAP_MS, isValidFileName, isValidName, isValidScriptName, nowIso, paths, safeRelPath, spoorHome } from "./paths.ts";
 
 export class NotFound extends Error {}
 export class BadRequest extends Error {}
@@ -96,10 +97,13 @@ export function addSite(name: string, site: Site): SiteEntry {
   validateUrl(site.url);
   if (site.check !== undefined && !isValidScriptName(site.check)) throw new BadRequest(`invalid check script name ${JSON.stringify(site.check)}`);
   if (site.min_gap_ms !== undefined && (!Number.isFinite(site.min_gap_ms) || site.min_gap_ms < 0)) throw new BadRequest("min_gap_ms must be >= 0");
+  if (site.keepalive_mins !== undefined && (!Number.isFinite(site.keepalive_mins) || site.keepalive_mins < 1)) throw new BadRequest("keepalive_mins must be >= 1");
   const reg = readJson<Registry>(paths.sites(), { sites: {} });
-  const clean: Site = { url: site.url };
+  // Adding an existing site updates it: fields not given keep their value.
+  const clean: Site = { ...reg.sites?.[name], url: site.url };
   if (site.check) clean.check = site.check;
   if (site.min_gap_ms !== undefined) clean.min_gap_ms = site.min_gap_ms;
+  if (site.keepalive_mins !== undefined) clean.keepalive_mins = site.keepalive_mins;
   reg.sites = { ...reg.sites, [name]: clean };
   writeJson(paths.sites(), reg);
   mkdirSync(paths.scripts(name), { recursive: true });
@@ -137,8 +141,11 @@ export interface ScriptInfo {
   name: string;
   bytes: number;
   modified: string;
-  /** First `//` comment line, if any. */
+  /** First `//` comment line, or the action's description. */
   description?: string;
+  /** Present when the script declares a spoor-action block. */
+  action?: ActionSpec;
+  action_error?: string;
 }
 
 function scriptPath(site: string, name: string): string {
@@ -157,9 +164,17 @@ export function listScripts(site: string): ScriptInfo[] {
   return names.sort().map(f => {
     const path = join(paths.scripts(site), f);
     const st = statSync(path);
-    const first = readFileSync(path, "utf8").split("\n", 1)[0] ?? "";
+    const code = readFileSync(path, "utf8");
+    const first = code.split("\n", 1)[0] ?? "";
     const m = first.match(/^\s*\/\/\s*(.+)$/);
-    return { name: f.slice(0, -3), bytes: st.size, modified: st.mtime.toISOString(), description: m?.[1] };
+    const info: ScriptInfo = { name: f.slice(0, -3), bytes: st.size, modified: st.mtime.toISOString(), description: m?.[1] };
+    const action = parseAction(code);
+    if (action && "error" in action) info.action_error = action.error;
+    else if (action) {
+      info.action = action;
+      info.description = action.description ?? info.description;
+    }
+    return info;
   });
 }
 
@@ -235,22 +250,87 @@ export function saveRunFile(site: string, id: string, name: string, data: string
   return buf.length;
 }
 
+/** A run file by name: a top-level file, or a path below files/ (downloads). */
 export function runFilePath(site: string, id: string, name: string): string {
-  if (!isValidRunId(id) || !isValidFileName(name)) throw new NotFound("invalid path");
-  const path = join(paths.run(site, id), name);
+  if (!isValidRunId(id)) throw new NotFound("invalid path");
+  const rel = name.startsWith("files/") ? `files/${safeRelPath(name.slice(6))}` : name;
+  if (rel !== name || (!name.startsWith("files/") && !isValidFileName(name))) throw new NotFound("invalid path");
+  const path = join(paths.run(site, id), rel);
   if (!existsSync(path)) throw new NotFound(`no file ${name} in run ${id}`);
   return path;
 }
 
+/** Every file in a run folder, downloads as files/<path>. */
 export function listRunFiles(site: string, id: string): { name: string; bytes: number }[] {
+  const root = paths.run(site, id);
+  const walk = (dir: string): { name: string; bytes: number }[] => {
+    try {
+      return readdirSync(dir, { withFileTypes: true }).flatMap(d => {
+        const p = join(dir, d.name);
+        if (d.isDirectory()) return walk(p);
+        return d.isFile() ? [{ name: relative(root, p).split(sep).join("/"), bytes: statSync(p).size }] : [];
+      });
+    } catch {
+      return [];
+    }
+  };
+  return walk(root).sort((a, b) => a.name.localeCompare(b.name));
+}
+
+/**
+ * Move a file Firefox downloaded (into the downloads folder) to the run's
+ * files/<rel>. Returns the run-relative name and size.
+ */
+export function adoptDownload(site: string, id: string, from: string, rel: string): { file: string; bytes: number } {
+  const src = resolve(from);
+  if (!src.startsWith(resolve(paths.downloads()) + sep)) throw new BadRequest(`refusing to adopt ${from}: not in ${paths.downloads()}`);
+  const clean = safeRelPath(rel);
+  if (!clean) throw new BadRequest(`invalid download path ${JSON.stringify(rel)}`);
+  const dest = join(paths.run(site, id), "files", clean);
+  mkdirSync(dirname(dest), { recursive: true });
   try {
-    return readdirSync(paths.run(site, id), { withFileTypes: true })
-      .filter(d => d.isFile())
-      .map(d => ({ name: d.name, bytes: statSync(join(paths.run(site, id), d.name)).size }))
-      .sort((a, b) => a.name.localeCompare(b.name));
-  } catch {
-    return [];
+    renameSync(src, dest);
+  } catch (e: any) {
+    if (e?.code !== "EXDEV") throw e;
+    copyFileSync(src, dest);
+    unlinkSync(src);
   }
+  return { file: `files/${clean}`, bytes: statSync(dest).size };
+}
+
+// ---------------------------------------------------------------- script state (spoor.state)
+
+function stateFile(site: string, script: string): string {
+  const name = script === "(inline)" ? "inline" : script.replace(/\.js$/, "");
+  if (!isValidScriptName(name)) throw new BadRequest(`invalid script name ${JSON.stringify(script)}`);
+  return paths.state(site, name);
+}
+
+export function readScriptState(site: string, script: string): Record<string, unknown> {
+  return readJson<Record<string, unknown>>(stateFile(site, script), {});
+}
+
+export function writeScriptState(site: string, script: string, key: string, value: unknown): void {
+  const all = readScriptState(site, script);
+  if (value === undefined || value === null) delete all[key];
+  else all[key] = value;
+  writeJson(stateFile(site, script), all);
+}
+
+// ---------------------------------------------------------------- session state
+
+export function readSession(site: string): SessionState {
+  return readJson<SessionState>(paths.session(site), { state: "unknown" });
+}
+
+/** Record a check result; returns the previous state. */
+export function writeSession(site: string, next: Omit<SessionState, "changed_at" | "checked_at">): SessionState {
+  const prev = readSession(site);
+  const now = nowIso();
+  const out: SessionState = { ...next, checked_at: now, changed_at: prev.state === next.state ? prev.changed_at ?? now : now };
+  if (!out.error) delete out.error;
+  writeJson(paths.session(site), out);
+  return prev;
 }
 
 // ---------------------------------------------------------------- recordings

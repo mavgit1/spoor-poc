@@ -20,6 +20,9 @@ export interface StartRun {
   timeout_secs?: number;
   /** Check runs are not written to disk. */
   ephemeral?: boolean;
+  /** Started as an action (args already validated). */
+  action?: boolean;
+  writes?: boolean;
 }
 
 interface ActiveRun {
@@ -36,7 +39,8 @@ interface ActiveRun {
 
 export interface ExtensionLink {
   call<T = any>(method: string, params?: unknown, timeoutMs?: number): Promise<T>;
-  connected(): boolean;
+  /** Start Spoor's Firefox if it isn't running, and wait until it is connected. */
+  ensure(): Promise<void>;
 }
 
 const FINAL: RunStatus[] = ["ok", "error", "stopped"];
@@ -68,6 +72,8 @@ export class RunManager {
       status: "queued",
       started: nowIso(),
     };
+    if (req.action) meta.action = true;
+    if (req.writes) meta.writes = true;
     const params: ExecParams = {
       run_id: id,
       site: site.name,
@@ -102,10 +108,13 @@ export class RunManager {
 
   private async launch(run: ActiveRun): Promise<void> {
     if (FINAL.includes(run.meta.status)) return; // stopped while queued
-    if (!this.ext.connected()) {
-      this.finish({ run_id: run.meta.id, ok: false, status: "error", error: "Spoor's Firefox is not connected — start it with `spoor browser`", requests: 0 });
+    try {
+      await this.ext.ensure();
+    } catch (e) {
+      this.finish({ run_id: run.meta.id, ok: false, status: "error", error: (e as Error).message, requests: 0 });
       return;
     }
+    if (FINAL.includes(run.meta.status)) return; // stopped while Firefox started
     run.meta.status = "running";
     this.event(run.meta.id, { type: "status", status: "running" });
     run.timer = setTimeout(() => {

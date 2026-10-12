@@ -1,6 +1,7 @@
 // spoor — command line. Commands that need the browser talk to the local
-// service (started in the background on first use). Commands that only read
-// recordings (flows, trace, auth, …) read the files directly.
+// service (started in the background on first use; it starts Spoor's Firefox
+// when needed). Commands that only read recordings (flows, trace, auth, …)
+// read the files directly.
 
 import { readFileSync } from "node:fs";
 import { parseArgs, type ParseArgsConfig } from "node:util";
@@ -12,25 +13,36 @@ import { authChain, endpoints, flowLine, lifetimes, matchingFlows, trace } from 
 import { DEFAULT_PORT, paths, spoorHome } from "../service/paths.ts";
 import { serve } from "../service/server.ts";
 import * as store from "../service/store.ts";
-import { launch, sign } from "./firefox.ts";
+import { launch } from "./firefox.ts";
 import { install } from "./install.ts";
+import { mcp } from "./mcp.ts";
 
 const HELP = `spoor — workbench for sites with no API
 
 Setup
   spoor install                         register the native messaging host with Firefox
-  spoor browser [--dev] [--headless]    start Spoor's Firefox (home panel + sidebar)
-  spoor sign                            sign the extension (unlisted, needs AMO_JWT_ISSUER/SECRET)
+  spoor browser [--headless]            start Spoor's Firefox (Developer Edition; also starts on demand)
   spoor serve [--port 7517]             run the local service in the foreground
+  spoor mcp                             MCP server on stdio (sessions, runs, actions as tools)
   spoor shutdown | state
 
 Sites
-  spoor site add <name> <url> [--check <script>] [--min-gap-ms <n>]
+  spoor site add <name> <url> [--check <script>] [--min-gap-ms <n>] [--keepalive-mins <n>]
   spoor site list | remove <name> | info <name>
   spoor notes <site> [--set <file>|-]
   spoor open <site> [--url <u>] [--wait] [--timeout <s>]
   spoor status <site>
   spoor stop [site]                     kill switch: stop runs, close worker tabs
+
+Sessions
+  spoor login <site> [--timeout <s>] [--no-wait]   bring the site forward, wait until the check passes
+  spoor session <site>                  login state, cookie summary
+  spoor session clear <site> [--cache] --yes       forget the site's cookies and storage (and the HTTP cache)
+  spoor session cookies <site>          print the container's cookies (audited)
+
+Actions                     (scripts with a spoor-action block; same as MCP tools)
+  spoor actions [site]
+  spoor act <site> <action> [--arg k=v]... [--args <json|@file>] [--login-wait] [--detach]
 
 Scripts and runs
   spoor script list <site> | show <site> <name> | add <site> <name> <file> | rm <site> <name>
@@ -152,32 +164,84 @@ async function main(argv: string[]): Promise<number> {
       out(`native host registered\n  manifest  ${r.manifest}\n  launcher  ${r.launcher}${r.registry ? `\n  registry  ${r.registry}` : ""}`);
       return 0;
     }
-    case "sign":
-      out(`signed: ${sign()}`);
-      return 0;
     case "browser": {
-      const { values, positionals } = parse(rest, { dev: { type: "boolean" }, headless: { type: "boolean" } });
-      const code = await launch({ dev: !!values.dev, headless: !!values.headless, urls: positionals });
-      if (code === null) out(`Spoor's Firefox started (profile ${paths.profile()})`);
-      return code ?? 0;
+      const { values, positionals } = parse(rest, { headless: { type: "boolean" } });
+      launch({ headless: !!values.headless, urls: positionals });
+      out(`Spoor's Firefox started (profile ${paths.profile()})`);
+      return 0;
+    }
+    case "mcp":
+      await mcp();
+      return new Promise<number>(() => {});
+
+    case "login": {
+      const { values, positionals } = parse(rest, { timeout: { type: "string" }, "no-wait": { type: "boolean" } });
+      const site = need(positionals[0], "site");
+      if (!values["no-wait"]) console.error(`· waiting for you to log in to ${site} in Spoor's Firefox…`);
+      const r = await api("POST", `/sites/${site}/login`, { timeout_secs: values.timeout ? Number(values.timeout) : undefined, wait: !values["no-wait"] });
+      out(r);
+      return r.logged_in === false ? 1 : 0;
+    }
+    case "session": {
+      const { values, positionals } = parse(rest, { cache: { type: "boolean" }, yes: { type: "boolean" } });
+      const [a, b] = positionals;
+      if (a === "clear") {
+        const site = need(b, "site");
+        store.getSite(site);
+        if (!values.yes) {
+          out(`This logs ${site} out: it removes every cookie and all storage in its container${values.cache ? ", plus Firefox's HTTP cache (shared by all sites)" : ""}.
+Run again with --yes to do it.`);
+          return 2;
+        }
+        out(await api("POST", `/sites/${site}/session/clear`, { cache: !!values.cache }));
+        return 0;
+      }
+      if (a === "cookies") return out(await api("GET", `/sites/${need(b, "site")}/session/cookies`)), 0;
+      out(await api("GET", `/sites/${need(a, "site")}/session`));
+      return 0;
+    }
+    case "actions": {
+      const list = await api<any[]>("GET", rest[0] ? `/sites/${rest[0]}/actions` : "/actions");
+      for (const a of list) {
+        if (a.error) {
+          out(`${a.site}/${a.name}  ✘ ${a.error}`);
+          continue;
+        }
+        const params = Object.entries(a.params as Record<string, { type: string }>).map(([k, p]) => `${k}${a.required.includes(k) ? "" : "?"}:${p.type}`).join(" ");
+        out(`${`${a.site}/${a.name}`.padEnd(32)} ${a.writes ? "writes" : "read  "}  ${params.padEnd(30)} ${a.description ?? ""}`);
+      }
+      return 0;
+    }
+    case "act": {
+      const { values, positionals } = parse(rest, { ...ARG_OPTS, detach: { type: "boolean" }, "login-wait": { type: "boolean" } });
+      const [site, action] = positionals;
+      const meta = await api<RunMeta>("POST", `/sites/${need(site, "site")}/actions/${need(action, "action")}`, {
+        args: collectArgs(values as { args?: string; arg?: string[] }),
+        timeout_secs: values.timeout ? Number(values.timeout) : undefined,
+        login: values["login-wait"] ? "wait" : undefined,
+      });
+      if (values.detach) return out(meta), 0;
+      console.error(`· run ${meta.id} (${site}/${action})`);
+      return follow(site!, meta.id);
     }
 
     case "site": {
       const [sub, ...r] = rest;
       if (sub === "add") {
-        const { values, positionals } = parse(r, { check: { type: "string" }, "min-gap-ms": { type: "string" } });
+        const { values, positionals } = parse(r, { check: { type: "string" }, "min-gap-ms": { type: "string" }, "keepalive-mins": { type: "string" } });
         const [name, url] = positionals;
         const s = store.addSite(need(name, "name"), {
           url: need(url, "url"),
           check: values.check as string | undefined,
           min_gap_ms: values["min-gap-ms"] !== undefined ? Number(values["min-gap-ms"]) : undefined,
+          keepalive_mins: values["keepalive-mins"] !== undefined ? Number(values["keepalive-mins"]) : undefined,
         });
         out(s);
         out(`folder: ${paths.site(s.name)}`);
         return 0;
       }
       if (sub === "list") {
-        for (const s of store.listSites()) out(`${s.name.padEnd(16)} ${s.url}${s.check ? `  check=${s.check}` : ""}${s.min_gap_ms !== undefined ? `  gap=${s.min_gap_ms}ms` : ""}`);
+        for (const s of store.listSites()) out(`${s.name.padEnd(16)} ${s.url}${s.check ? `  check=${s.check}` : ""}${s.min_gap_ms !== undefined ? `  gap=${s.min_gap_ms}ms` : ""}${s.keepalive_mins ? `  keepalive=${s.keepalive_mins}min` : ""}  ${store.readSession(s.name).state}`);
         return 0;
       }
       if (sub === "remove") {

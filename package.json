@@ -1,6 +1,6 @@
 {
   "name": "spoor",
-  "version": "0.7.0",
+  "version": "0.8.0",
   "private": true,
   "description": "Workbench for building internal webapps against sites with no API: Firefox extension + local service + CLI",
   "type": "module",
@@ -27,7 +27,6 @@
     "@types/ws": "^8.18.2",
     "esbuild": "^0.28.2",
     "playwright": "^1.63.0",
-    "typescript": "^5.9.3",
-    "web-ext": "^10.7.0"
+    "typescript": "^5.9.3"
   }
 }

@@ -54,7 +54,8 @@ export function lifetimesMarkdown(l: { cookies: CookieLifetime[]; jwts: JwtInfo[
 export function endpointsMarkdown(eps: Endpoint[]): string {
   const lines = ["## Endpoints", "", "| method | origin | path | n | status | response | query | request body | example seq |", "|---|---|---|---|---|---|---|---|---|"];
   for (const e of eps) {
-    lines.push(`| ${e.method} | ${e.origin} | ${esc(e.path)} | ${e.count} | ${e.statuses.join(", ")} | ${e.content_types.join(", ")} | ${e.query_params.join(", ")} | ${e.request_body ?? ""} | ${e.examples.join(", ")} |`);
+    const path = e.dispatch ? `${e.path}?${Object.entries(e.dispatch).map(([k, v]) => `${k}=${v}`).join("&")}` : e.path;
+    lines.push(`| ${e.method} | ${e.origin} | ${esc(path)} | ${e.count} | ${e.statuses.join(", ")} | ${e.content_types.join(", ")} | ${e.query_params.join(", ")} | ${e.request_body ?? ""} | ${e.examples.join(", ")} |`);
   }
   return lines.join("\n") + "\n";
 }
