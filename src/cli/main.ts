@@ -48,7 +48,7 @@ Scripts and runs
   spoor script list <site> | show <site> <name> | add <site> <name> <file> | rm <site> <name>
   spoor run <site> <script> [--arg k=v]... [--args <json|@file>] [--url <u>] [--timeout <s>] [--detach]
   spoor exec <site> [<file> | -e <code>] [--arg k=v]... [--args …] [--url <u>] [--timeout <s>] [--full]
-  spoor runs <site> [<id>] [--pause|--resume|--stop]
+  spoor runs <site> [<id>] [--result|--pause|--resume|--stop]
   spoor audit <site> [--tail <n>]
 
 Recording and discovery     (<rec> = id, <site>:<id>, latest or <site>:latest)
@@ -118,8 +118,20 @@ function eventLine(e: RunEvent): string | null {
 /** Follow a run's events until it finishes; console output goes to stderr, the result to stdout. */
 async function follow(site: string, id: string): Promise<number> {
   let after = 0;
+  let failures = 0;
   for (;;) {
-    const r = await api<{ events: RunEvent[]; status: string }>("GET", `/sites/${site}/runs/${id}/events?after=${after}&wait_ms=25000`);
+    let r: { events: RunEvent[]; status: string };
+    try {
+      r = await api<{ events: RunEvent[]; status: string }>("GET", `/sites/${site}/runs/${id}/events?after=${after}&wait_ms=25000`);
+      failures = 0;
+    } catch (e) {
+      // The run lives in the service, not in this process: lose the
+      // connection, keep following (the service restarts on demand).
+      if (e instanceof ApiError || ++failures > 20) throw e;
+      console.error(`· lost the service (${(e as Error).message}); still following run ${id}…`);
+      await new Promise(res => setTimeout(res, 3000));
+      continue;
+    }
     for (const e of r.events) {
       after = Math.max(after, e.n);
       if (e.type === "result") {
@@ -215,13 +227,24 @@ Run again with --yes to do it.`);
     case "act": {
       const { values, positionals } = parse(rest, { ...ARG_OPTS, detach: { type: "boolean" }, "login-wait": { type: "boolean" } });
       const [site, action] = positionals;
-      const meta = await api<RunMeta>("POST", `/sites/${need(site, "site")}/actions/${need(action, "action")}`, {
+      need(site, "site");
+      need(action, "action");
+      if (values["login-wait"]) {
+        // Log in first, as its own step: the run only starts once that's done.
+        const st = await api<{ state?: string }>("GET", `/sites/${site}/session`);
+        if (st.state !== "logged_in") {
+          console.error(`· ${site} needs a login: waiting for you in Spoor's Firefox…`);
+          const done = await api<{ logged_in?: boolean; check_error?: string }>("POST", `/sites/${site}/login`, { timeout_secs: 900 });
+          if (done.logged_in === false) throw new Error(`not logged in to ${site}: ${done.check_error ?? "timed out"}`);
+          console.error(`· logged in`);
+        }
+      }
+      const meta = await api<RunMeta>("POST", `/sites/${site}/actions/${action}`, {
         args: collectArgs(values as { args?: string; arg?: string[] }),
         timeout_secs: values.timeout ? Number(values.timeout) : undefined,
-        login: values["login-wait"] ? "wait" : undefined,
       });
+      console.error(`· run ${meta.id} (${site}/${action}) — \`spoor runs ${site} ${meta.id} --result\` prints the result later`);
       if (values.detach) return out(meta), 0;
-      console.error(`· run ${meta.id} (${site}/${action})`);
       return follow(site!, meta.id);
     }
 
@@ -326,9 +349,17 @@ Run again with --yes to do it.`);
       return r.ok ? 0 : 1;
     }
     case "runs": {
-      const { values, positionals } = parse(rest, { pause: { type: "boolean" }, resume: { type: "boolean" }, stop: { type: "boolean" }, limit: { type: "string" } });
+      const { values, positionals } = parse(rest, { pause: { type: "boolean" }, resume: { type: "boolean" }, stop: { type: "boolean" }, limit: { type: "string" }, result: { type: "boolean" } });
       const [site, id] = positionals;
       need(site, "site");
+      if (id && values.result) {
+        const meta = store.readRunMeta(site!, id);
+        const result = store.readRunEvents(site!, id).find(e => e.type === "result");
+        if (!result || result.type !== "result") throw new Error(`run ${id} is ${meta.status}; no result yet`);
+        if (!result.ok) throw new Error(`run ${id} failed: ${result.error}`);
+        out(result.result ?? null);
+        return 0;
+      }
       if (!id) {
         for (const m of store.listRuns(site!, Number(values.limit ?? 30))) {
           out(`${m.id}  ${m.status.padEnd(8)} ${m.script.padEnd(20)} ${m.duration_ms !== undefined ? duration(Math.round(m.duration_ms / 1000)).padEnd(8) : "".padEnd(8)} ${m.error ?? ""}`);

@@ -3,6 +3,7 @@
 
 import { spawn } from "node:child_process";
 import { mkdirSync, openSync } from "node:fs";
+import { request as httpRequest } from "node:http";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 
@@ -55,20 +56,38 @@ export class ApiError extends Error {
   }
 }
 
+/**
+ * One request to the local service. Uses node:http rather than fetch:
+ * fetch (undici) gives up on a response after 5 minutes without headers,
+ * and some calls here legitimately wait longer (a login, a run with wait).
+ */
+function request(url: string, method: string, token: string, body?: unknown): Promise<{ status: number; contentType: string; text: string }> {
+  return new Promise((resolve, reject) => {
+    const payload = body === undefined ? undefined : JSON.stringify(body);
+    const req = httpRequest(url, {
+      method,
+      headers: { authorization: `Bearer ${token}`, "content-type": "application/json", ...(payload ? { "content-length": Buffer.byteLength(payload) } : {}) },
+    }, res => {
+      const chunks: Buffer[] = [];
+      res.on("data", c => chunks.push(c));
+      res.on("end", () => resolve({ status: res.statusCode ?? 0, contentType: String(res.headers["content-type"] ?? ""), text: Buffer.concat(chunks).toString("utf8") }));
+      res.on("error", reject);
+    });
+    req.on("error", reject);
+    if (payload) req.write(payload);
+    req.end();
+  });
+}
+
 export async function api<T = any>(method: string, path: string, body?: unknown, opts: { start?: boolean } = {}): Promise<T> {
   const info = opts.start === false ? await runningService() : await ensureService();
   if (!info) throw new Error("spoor serve is not running");
-  const r = await fetch(info.url + path, {
-    method,
-    headers: { authorization: `Bearer ${info.token}`, "content-type": "application/json" },
-    body: body === undefined ? undefined : JSON.stringify(body),
-  });
-  const ct = r.headers.get("content-type") ?? "";
-  if (!ct.includes("application/json")) {
-    if (!r.ok) throw new ApiError(r.status, await r.text());
-    return (await r.text()) as T;
+  const r = await request(info.url + path, method, info.token, body);
+  if (!r.contentType.includes("application/json")) {
+    if (r.status >= 400) throw new ApiError(r.status, r.text);
+    return r.text as T;
   }
-  const data = await r.json();
-  if (!r.ok) throw new ApiError(r.status, (data as { error?: string }).error ?? r.statusText);
+  const data = JSON.parse(r.text);
+  if (r.status >= 400) throw new ApiError(r.status, (data as { error?: string }).error ?? `HTTP ${r.status}`);
   return data as T;
 }

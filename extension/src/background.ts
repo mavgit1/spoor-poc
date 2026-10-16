@@ -57,6 +57,10 @@ interface Run {
   auxTabs: number[];
   /** spoor.download() ids still in progress. */
   downloads: Set<number>;
+  /** A login check (marked in the audit). */
+  check: boolean;
+  /** The worker tab finished loading and the script is in; navigating away now ends the run. */
+  ready: boolean;
 }
 
 interface Recording {
@@ -208,7 +212,7 @@ function siteForStore(storeId: string | undefined): string | undefined {
  * and finished loading. Polls instead of trusting a single onUpdated event,
  * which is easy to miss when a page loads fast.
  */
-async function waitForLoad(tabId: number, since: number, timeoutMs = 60_000): Promise<void> {
+async function waitForLoad(tabId: number, since: number, timeoutMs = 60_000, until: "load" | "commit" = "load"): Promise<void> {
   const deadline = Date.now() + timeoutMs;
   let committed = false;
   const onCommitted = (d: { tabId: number; frameId: number; timeStamp: number }) => {
@@ -223,7 +227,7 @@ async function waitForLoad(tabId: number, since: number, timeoutMs = 60_000): Pr
       } catch {
         throw new Error("the tab was closed while loading");
       }
-      if (committed && tab.status === "complete") return;
+      if (committed && (until === "commit" || tab.status === "complete")) return;
       await new Promise(r => setTimeout(r, 100));
     }
     throw new Error(`page did not finish loading within ${timeoutMs / 1000}s`);
@@ -232,14 +236,19 @@ async function waitForLoad(tabId: number, since: number, timeoutMs = 60_000): Pr
   }
 }
 
-/** The site's worker tab, hidden, loaded at `url`. Reused across runs. */
-async function workerTab(site: string, url: string): Promise<number> {
+/**
+ * The site's worker tab, hidden, loaded at `url`. Reused across runs.
+ * `claim` gets the tab id before the page loads, so the load's requests are
+ * audited under the run that caused them.
+ */
+async function workerTab(site: string, url: string, claim: (tabId: number) => void): Promise<number> {
   const storeId = await containerFor(site);
   const id = state.workers.get(site);
   if (id !== undefined) {
     try {
       const tab = await browser.tabs.get(id);
       if (tab.cookieStoreId === storeId) {
+        claim(id);
         const since = Date.now();
         await browser.tabs.update(id, { url });
         await waitForLoad(id, since);
@@ -252,6 +261,7 @@ async function workerTab(site: string, url: string): Promise<number> {
   }
   const since = Date.now();
   const tab = await hiddenTab(storeId, url);
+  claim(tab);
   state.workers.set(site, tab);
   await waitForLoad(tab, since);
   broadcast();
@@ -311,15 +321,20 @@ async function exec(p: ExecParams): Promise<{ accepted: true }> {
     resumeWaiters: [],
     auxTabs: [],
     downloads: new Set(),
+    check: !!p.check,
+    ready: false,
   };
   state.runs.set(run.id, run);
   run.timer = setTimeout(() => void stopRun(run, "error", `timed out after ${Math.round(p.timeout_ms / 1000)} s`), p.timeout_ms);
   broadcast();
   void (async () => {
     try {
-      const tabId = await workerTab(p.site, p.url ?? p.site_url);
+      const tabId = await workerTab(p.site, p.url ?? p.site_url, id => {
+        run.tabId = id;
+        lingering.delete(id); // the tab is this run's now
+      });
       if (!state.runs.has(run.id)) return; // stopped while loading
-      run.tabId = tabId;
+      run.ready = true;
       await browser.tabs.executeScript(tabId, { code: buildWrapper(p.run_id, p.args, p.code), runAt: "document_idle" });
     } catch (e) {
       await finishRun(run, { ok: false, status: "error", error: errorText(e) });
@@ -455,7 +470,7 @@ async function onScriptMessage(msg: any, run: Run): Promise<unknown> {
       const since = Date.now();
       const tab = await hiddenTab(storeId, String(d.url));
       run.auxTabs.push(tab);
-      await waitForLoad(tab, since);
+      await waitForLoad(tab, since, 60_000, d.until === "commit" ? "commit" : "load");
       return { tab };
     }
     case "tab.fetch": {
@@ -665,12 +680,14 @@ async function openSidebar(): Promise<void> {
 
 /** The run whose script lives in this tab (its worker tab). */
 function runForTab(tabId: number): Run | undefined {
+  if (tabId < 0) return undefined; // no tab (yet): not a run's request, and runs start at -1
   for (const r of state.runs.values()) if (r.tabId === tabId) return r;
   return undefined;
 }
 
 /** The run using this tab, as worker or spoor.tab(). */
 function runUsingTab(tabId: number): Run | undefined {
+  if (tabId < 0) return undefined;
   for (const r of state.runs.values()) if (r.tabId === tabId || r.auxTabs.includes(tabId)) return r;
   return undefined;
 }
@@ -684,21 +701,21 @@ browser.webRequest.onCompleted.addListener(d => {
   const run = auditRunForTab(d.tabId);
   if (!run) return;
   run.requests++;
-  emit("audit", { site: run.site, run: run.id, method: d.method, url: d.url, status: d.statusCode, type: d.type });
+  emit("audit", { site: run.site, run: run.id, ...(run.check ? { check: true } : {}), method: d.method, url: d.url, status: d.statusCode, type: d.type, tab: d.tabId, worker: d.tabId === run.tabId });
 }, { urls: ["<all_urls>"] });
 
 browser.webRequest.onErrorOccurred.addListener(d => {
   const run = auditRunForTab(d.tabId);
   if (!run) return;
   run.requests++;
-  emit("audit", { site: run.site, run: run.id, method: d.method, url: d.url, error: d.error, type: d.type });
+  emit("audit", { site: run.site, run: run.id, ...(run.check ? { check: true } : {}), method: d.method, url: d.url, error: d.error, type: d.type, tab: d.tabId, worker: d.tabId === run.tabId });
 }, { urls: ["<all_urls>"] });
 
 // A run's page navigating away destroys the script's context.
 browser.webNavigation.onCommitted.addListener(d => {
   if (d.frameId !== 0) return;
   const run = runForTab(d.tabId);
-  if (run) void finishRun(run, { ok: false, status: "error", error: `the worker tab navigated to ${d.url}; don't navigate in scripts, use fetch` });
+  if (run?.ready) void finishRun(run, { ok: false, status: "error", error: `the worker tab navigated to ${d.url}; don't navigate in scripts, use fetch` });
 });
 
 browser.tabs.onRemoved.addListener(tabId => {
@@ -905,6 +922,15 @@ browser.webRequest.onErrorOccurred.addListener(d => {
   finalizeFlow(rec, d.requestId, pf);
 }, { urls: ["<all_urls>"] });
 
+/**
+ * A tab the human uses, as opposed to Spoor's own worker and spoor.tab tabs.
+ * Known by origin, not by tab.hidden: hiding can fail (headless, or the
+ * tabHide pref off), and then a login prompt would grab a worker tab.
+ */
+function isHumanTab(t: browser.tabs.Tab): boolean {
+  return t.id !== undefined && !createdThisSession.has(t.id) && !t.hidden;
+}
+
 async function siteTabs(site: string): Promise<browser.tabs.Tab[]> {
   const storeId = await containerFor(site);
   return browser.tabs.query({ cookieStoreId: storeId });
@@ -923,7 +949,7 @@ async function recordStart(p: { site: string; rec_id: string; url?: string; open
   state.recordings.set(p.site, { rec_id: p.rec_id, site: p.site, storeId, seq: 0, flows: 0, started: Date.now(), open: new Map() });
   broadcast();
   if (p.open) {
-    const visible = (await siteTabs(p.site)).filter(t => !t.hidden);
+    const visible = (await siteTabs(p.site)).filter(isHumanTab);
     if (p.url || visible.length === 0) await openSite(p.site, p.url ?? p.site_url);
     else await browser.tabs.update(visible[0]!.id!, { active: true });
   }
@@ -1022,7 +1048,7 @@ const handlers = {
       container: state.containers.get(p.site),
       worker_tab: state.workers.get(p.site),
       recording: state.recordings.get(p.site)?.rec_id,
-      open_tabs: tabs.filter(t => !t.hidden).length,
+      open_tabs: tabs.filter(isHumanTab).length,
       active_run: run?.id,
     };
   },
@@ -1042,7 +1068,7 @@ const handlers = {
   cookies: (p: { site: string; url?: string }) => cookiesFor(p.site, p.url),
   "session.clear": clearSession,
   "login.prompt": loginPrompt,
-  "login.tabs": async (p: { site: string }) => (await siteTabs(p.site)).filter(t => !t.hidden).map(t => ({ url: t.url, status: t.status })),
+  "login.tabs": async (p: { site: string }) => (await siteTabs(p.site)).filter(isHumanTab).map(t => ({ url: t.url, status: t.status })),
 };
 
 /**
@@ -1074,7 +1100,7 @@ async function clearSession(p: { site: string; cache?: boolean }): Promise<{ coo
 /** Bring a visible tab of the site to the front at its start page, for the human to log in. */
 async function loginPrompt(p: { site: string; url: string }): Promise<{ tab: number }> {
   const storeId = await containerFor(p.site);
-  const [existing] = (await siteTabs(p.site)).filter(t => !t.hidden);
+  const [existing] = (await siteTabs(p.site)).filter(isHumanTab);
   const tab = existing
     ? await browser.tabs.update(existing.id!, { url: p.url, active: true })
     : await browser.tabs.create({ url: p.url, cookieStoreId: storeId, active: true });
@@ -1205,7 +1231,7 @@ browser.notifications.onClicked.addListener(id => {
   const site = loginNotices.get(id);
   if (!site) return void openSidebar();
   void (async () => {
-    const [tab] = (await siteTabs(site)).filter(t => !t.hidden);
+    const [tab] = (await siteTabs(site)).filter(isHumanTab);
     if (tab?.id !== undefined) {
       await browser.tabs.update(tab.id, { active: true });
       if (tab.windowId !== undefined) await browser.windows.update(tab.windowId, { state: "normal", focused: true });

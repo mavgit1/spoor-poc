@@ -13,9 +13,11 @@
 //                                    Firefox downloads it with the site's cookies, straight
 //                                    to the run's files/; → {path, file, abs, bytes, mime}
 //   spoor.html(url, init?)           fetch + parse → Document (links resolve against the final URL)
-//   spoor.tab(url)                   another hidden tab in the same container (another
-//                                    origin, e.g. a video host): {fetch, html, eval, urls, close};
-//                                    urls() = the pages it committed, in order (where a link went)
+//   spoor.tab(url, {until?})         another hidden tab in the same container (another
+//                                    origin, e.g. a video host): {fetch, html, eval, urls, close},
+//                                    all async; await t.urls() = the pages it committed, in
+//                                    order (where a link went); until: "commit" returns once the
+//                                    tab has landed somewhere, without waiting for the page to load
 //                                    its fetch gives {status, ok, headers.get, text, json, bytes}
 //   spoor.state.get(key) / set(key, value) / all()
 //                                    JSON values this script keeps between runs
@@ -55,9 +57,9 @@ const __spoor = Object.freeze({
     return __send("download", { ...o, url: new URL(url, location.href).href });
   },
   html: async (url, init) => { const r = await __fetch(url, init); return __parse(await r.text(), r.url || new URL(url, location.href).href); },
-  tab: async url => {
+  tab: async (url, opts) => {
     const href = new URL(url, location.href).href;
-    const { tab } = await __send("tab.open", { url: href });
+    const { tab } = await __send("tab.open", { url: href, until: opts?.until });
     const tfetch = async (u, init) => {
       const r = await __send("tab.fetch", { tab, url: String(u), init: __init(init) });
       return __response(r);

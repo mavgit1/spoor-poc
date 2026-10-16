@@ -85,6 +85,7 @@ export class RunManager {
       timeout_ms: timeoutMs,
       min_gap_ms: store.minGap(site),
     };
+    if (req.ephemeral) params.check = true;
     let resolve!: ActiveRun["resolve"];
     const done = new Promise<RunMeta & { result?: unknown }>(r => (resolve = r));
     const run: ActiveRun = { meta, params, ephemeral: !!req.ephemeral, n: 0, events: [], done, resolve, listeners: new Set() };
@@ -185,6 +186,11 @@ export class RunManager {
     if (!run) return undefined;
     if (!timeoutMs) return run.done;
     return Promise.race([run.done, new Promise<undefined>(r => setTimeout(() => r(undefined), timeoutMs))]);
+  }
+
+  /** A login check: not written to disk. */
+  isEphemeral(runId: string): boolean {
+    return !!this.active.get(runId)?.ephemeral;
   }
 
   get(runId: string): RunMeta | undefined {

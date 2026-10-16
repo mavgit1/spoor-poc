@@ -164,7 +164,12 @@ return { status: r.status, body: await r.json() };`,
   const paced = await api("POST", "/sites/testapp/exec", { code: "const rs = await Promise.all([1,2,3,4].map(i => fetch('/api/slow/' + i).then(r => r.json()))); return rs.length;" });
   const times = site.hits.slice(t0).filter(h => h.path.startsWith("/api/slow")).map(h => h.at).sort();
   const gaps = times.slice(1).map((t, i) => t - times[i]!);
-  check("parallel fetches are paced (min_gap 300 ms)", paced.ok && gaps.length === 3 && gaps.every(g => g >= 270), { gaps, paced });
+  // Spoor spaces when requests leave; the server sees arrivals, and one request
+  // can arrive ~220 ms late, and the next one then closes in (seen: 526/71/643,
+  // 547/64/364). So: the burst spans at least 3 gaps, and no two requests
+  // arrive together (unpaced, all four land within a few ms).
+  const span = times.length === 4 ? times[3]! - times[0]! : 0;
+  check("parallel fetches are paced (min_gap 300 ms)", paced.ok && gaps.length === 3 && span >= 3 * 280 && gaps.every(g => g >= 40), { gaps, span, paced });
   check("requests counted for the run", paced.requests >= 4, paced.requests);
 
   const syntax = await api("POST", "/sites/testapp/exec", { code: "return (" });
@@ -246,10 +251,13 @@ const fn = await t.eval(a => a.x * 2, { x: 21 });
 await t.close();
 const doc = await spoor.html('/');
 const moved = await spoor.html('/go');
+const quick = await spoor.tab('/out', { until: 'commit' });
+const quickUrls = await quick.urls();
+await quick.close();
 const away = await spoor.tab('/out');
 const viaRedirect = await (await away.fetch('/api/whoami')).json();
 const awayUrls = await away.urls();
-return { who, host, fn, item: doc.querySelector('input[name=itemId]').value, link: moved.getElementById('l').href, viaRedirect, awayUrls };`,
+return { who, host, fn, item: doc.querySelector('input[name=itemId]').value, link: moved.getElementById('l').href, viaRedirect, awayUrls, quickUrls };`,
     args: { idp: site.idp },
   });
   check("spoor.tab fetches another origin with that origin's cookies", tab.ok && tab.result.who?.user === "tester", tab);
@@ -258,6 +266,7 @@ return { who, host, fn, item: doc.querySelector('input[name=itemId]').value, lin
   check("spoor.html resolves links against the page it was redirected to", tab.ok && tab.result.link === `${site.app}/docs/file.txt`, tab.result);
   check("spoor.tab fetch resolves relative URLs against where the tab ended up", tab.ok && tab.result.viaRedirect?.user === "tester", tab.result);
   check("spoor.tab urls() shows where the link went", tab.ok && tab.result.awayUrls?.[0] === `${site.idp}/api/whoami`, tab.result?.awayUrls);
+  check("spoor.tab until: commit returns once the tab has landed", tab.ok && tab.result.quickUrls?.[0] === `${site.idp}/api/whoami`, tab.result?.quickUrls);
   const bytes = await api("POST", "/sites/testapp/exec", { code: "const b = await (await fetch('/api/items')).arrayBuffer(); await spoor.save('items.bin', new Uint8Array(b)); return b.byteLength;" });
   check("spoor.save takes bytes from the page's fetch", bytes.ok && statSync(join(paths.run("testapp", bytes.run_id), "items.bin")).size === bytes.result, bytes);
   const s1 = await api("POST", "/sites/testapp/exec", { code: "const n = (await spoor.state.get('n')) ?? 0; await spoor.state.set('n', n + 1); return n;" });
@@ -335,6 +344,21 @@ return { label: args.label, items: items.slice(0, args.limit).map(i => i.id) };
   const relogin = await api("POST", "/sites/testapp/login", { timeout_secs: 60 });
   check("login brings the site forward and waits until the check passes", relogin.logged_in === true, relogin);
   check("session state is logged in again", (await api("GET", "/sites/testapp/session?check=0")).state === "logged_in");
+  const checkAudit = (store.readAudit("testapp", 5000) as { check?: boolean; url?: string }[]).filter(a => a.check);
+  check("login checks run on /robots.txt and are marked in the audit", checkAudit.length > 0 && checkAudit.every(a => !a.url || a.url.startsWith(site.app)) && checkAudit.some(a => a.url?.endsWith("/robots.txt")), checkAudit.slice(-3));
+
+  store.writeScript("testapp", "broken-check", "throw new Error('cannot tell');");
+  store.addSite("testapp", { url: `${site.app}/`, check: "broken-check" });
+  const broken = await api("GET", "/sites/testapp/status");
+  check("a check that throws reports unknown, not logged out", broken.logged_in === undefined && (await api("GET", "/sites/testapp/session?check=0")).state === "unknown", broken);
+  store.addSite("testapp", { url: `${site.app}/`, check: "logged-in" });
+
+  await api("POST", "/sites/testapp/session/clear", {});
+  const actWait = await cli("act", "testapp", "list-items", "--arg", "limit=1", "--login-wait");
+  const runId = actWait.stderr.match(/· run (\S+)/)?.[1];
+  check("act --login-wait logs in first, prints the run id, then the result", actWait.status === 0 && /needs a login/.test(actWait.stderr) && !!runId && JSON.parse(actWait.stdout).items.length === 1, actWait.stdout + actWait.stderr);
+  const later = await cli("runs", "testapp", runId ?? "-", "--result");
+  check("spoor runs <id> --result prints a finished run's result", later.status === 0 && JSON.parse(later.stdout).items.length === 1, later.stdout + later.stderr);
 } catch (e) {
   failures++;
   console.log(`  ✘ ${(e as Error).stack}`);

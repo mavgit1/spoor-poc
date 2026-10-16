@@ -85,8 +85,11 @@ Each site's login lives in its container in Spoor's profile, and survives
 restarts: Spoor's Firefox restores its last session, which keeps session
 cookies (most logins are those).
 
-- **Check script** (`--check`): a script that returns true when logged in.
-  Spoor records its verdict in `session.json`.
+- **Check script** (`--check`): a script that returns true when logged in
+  and false when not. It runs on the site's `/robots.txt` (a page that never
+  redirects into a login), so it must `fetch` what it needs. Spoor records the
+  verdict in `session.json`; a check that throws or times out records
+  `unknown`, not `logged_out`.
 - **Login** (`spoor login`, `POST /sites/{site}/login`, MCP `spoor_login`):
   brings a tab of the site to the front, sends a notification, and waits until
   the check passes. It only checks once that tab is back on the site's own
@@ -114,7 +117,7 @@ cookies (most logins are those).
 | `spoor.save(name, data)` | writes a file into the run folder (string, JSON or bytes); → `{file, bytes, abs}` |
 | `await spoor.download(url, path \| {path?, dir?, referer?, method?, headers?, body?})` | Firefox's download manager fetches it with the site's cookies, straight to disk, into the run's `files/` (named by `path`, or by the server's file name inside `dir`); → `{path, file, abs, bytes, mime}`. `referer` sets the Referer header, which the download manager doesn't send by default (signed CDN links often check it). Use it for anything big |
 | `await spoor.html(url, init?)` | fetch and parse → `Document` |
-| `await spoor.tab(url)` | another hidden tab in the site's container, for another origin (a video host, an SSO-protected API): `{fetch, html, eval(code \| fn, args), urls(), close}`; `urls()` lists the pages it committed, so you can see where a link led. Its `fetch` returns `{status, ok, headers.get, text(), json(), bytes()}` |
+| `await spoor.tab(url, { until? })` | another hidden tab in the site's container, for another origin (a video host, an SSO-protected API): `{fetch, html, eval(code \| fn, args), urls(), close}`, all async (`await t.urls()`); `urls()` lists the pages it committed, so you can see where a link led. `until: "commit"` returns as soon as the tab has landed, without waiting for the page to finish loading (enough to learn where a link goes; some app pages never report done). Its `fetch` returns `{status, ok, headers.get, text(), json(), bytes()}` |
 | `spoor.state.get(key)`, `.set(key, value)`, `.all()` | JSON this script keeps between runs (e.g. what it already downloaded) |
 | `spoor.sleep(ms)`, `spoor.checkpoint()` | waits that respect Pause and Stop |
 
@@ -133,7 +136,7 @@ for (const [i, rec] of args.records.entries()) {
 ```bash
 spoor run cas batch-add --args @records.json   # streams logs; result on stdout
 spoor exec cas -e "return document.title"      # one-off, inline
-spoor runs cas                                 # history; spoor runs cas <id> for details
+spoor runs cas                                 # history; spoor runs cas <id> [--result] for details
 spoor stop cas                                 # kill switch
 ```
 
@@ -174,7 +177,7 @@ const doc = await spoor.html(`/ilias/goto.php/crs/${args.course}`);
 
 ```bash
 spoor actions [site]                               # list, with parameters
-spoor act cas batch-add --arg course=123 --login-wait
+spoor act cas batch-add --arg course=123 --login-wait   # logs in first if needed; prints the run id right away
 ```
 
 ### MCP

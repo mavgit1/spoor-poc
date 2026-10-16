@@ -19,6 +19,7 @@ export interface Site {
 
 /** What Spoor last saw of a site's login (`sites/<site>/session.json`). */
 export interface SessionState {
+  /** unknown: never checked, or the last check failed (threw, timed out). */
   state: "logged_in" | "logged_out" | "unknown";
   /** When the check script last ran. */
   checked_at?: string;
@@ -188,6 +189,8 @@ export interface ExecParams {
   url?: string;
   timeout_ms: number;
   min_gap_ms: number;
+  /** A login check; its requests are marked as such in the audit log. */
+  check?: boolean;
 }
 
 /** Extension → service: a run finished (or was stopped / timed out). */
@@ -208,4 +211,6 @@ export interface SiteBrowserState {
   recording?: string;
   open_tabs: number;
   active_run?: string;
+  /** A login check running in the worker tab (no run folder). */
+  active_check?: string;
 }

@@ -309,7 +309,7 @@ export class Service {
     });
     r("GET", "/sites/:site", async ctx => {
       const s = site(ctx);
-      const browser = this.peer ? await this.ext<SiteBrowserState>("status", { site: s.name }).catch(() => null) : null;
+      const browser = this.peer ? await this.ext<SiteBrowserState>("status", { site: s.name }).then(b => this.withCheck(b)).catch(() => null) : null;
       let dossier: string[] = [];
       try {
         dossier = readdirSync(paths.dossier(s.name));
@@ -572,30 +572,49 @@ export class Service {
     });
   }
 
-  private async status(name: string): Promise<{ site: string; browser: SiteBrowserState | null; logged_in?: boolean; check?: string; check_error?: string }> {
+  private async status(name: string, retried = false): Promise<{ site: string; browser: SiteBrowserState | null; logged_in?: boolean; check?: string; check_error?: string }> {
     const s = store.getSite(name);
     if (!this.peer) return { site: name, browser: null };
-    const browser = await this.ext<SiteBrowserState>("status", { site: name });
+    const browser = this.withCheck(await this.ext<SiteBrowserState>("status", { site: name }));
     if (!s.check) return { site: name, browser };
     // The check runs in the worker tab like any run; don't queue it behind a long batch.
     if (this.runs.activeRuns().some(m => m.site === name)) {
       const known = store.readSession(name);
       return { site: name, browser, check: s.check, logged_in: known.state === "logged_in" ? true : undefined, check_error: "skipped: a run is in progress" };
     }
-    const meta = this.runs.start({ site: name, script: s.check, ephemeral: true, timeout_secs: 60 });
+    // On a page that never redirects: loading the start page while logged out
+    // would set off an SSO round trip in the worker tab (next to the human's).
+    const meta = this.runs.start({ site: name, script: s.check, ephemeral: true, timeout_secs: 60, url: `${new URL(s.url).origin}/robots.txt` });
     const done = (await this.runs.wait(meta.id))!;
-    // The browser going away says nothing about the login.
+    // The browser going away says nothing about the login. Right after a
+    // start Firefox may reinstall a rebuilt add-on, which drops the first
+    // connection: reconnect and ask once more.
     if (done.error && /Firefox (is not running|disconnected|did not connect)|connection to the Spoor service/.test(done.error)) {
+      if (!retried) {
+        await this.ensureBrowser().catch(() => {});
+        if (this.peer) return this.status(name, true);
+      }
       return { site: name, browser, check: s.check, check_error: done.error };
     }
-    const loggedIn = done.status === "ok" && !!done.result;
-    const prev = store.writeSession(name, { state: loggedIn ? "logged_in" : "logged_out", error: done.error });
-    if (prev.state !== (loggedIn ? "logged_in" : "logged_out")) {
-      log(`session: ${name} ${prev.state} → ${loggedIn ? "logged_in" : "logged_out"}`);
-      store.audit(name, { event: "session.state", state: loggedIn ? "logged_in" : "logged_out", error: done.error });
+    // A check that failed (threw, timed out) doesn't know either: only a
+    // false result means logged out.
+    const state = done.status !== "ok" ? "unknown" : done.result ? "logged_in" : "logged_out";
+    const prev = store.writeSession(name, { state, error: done.error });
+    if (prev.state !== state) {
+      log(`session: ${name} ${prev.state} → ${state}${done.error ? ` (${done.error})` : ""}`);
+      store.audit(name, { event: "session.state", state, error: done.error });
       this.changed(name);
     }
-    return { site: name, browser, check: s.check, logged_in: loggedIn, check_error: done.error };
+    return { site: name, browser, check: s.check, logged_in: state === "unknown" ? undefined : state === "logged_in", check_error: done.error };
+  }
+
+  /** A login check in progress shows as active_check: it has no run folder to look up. */
+  private withCheck(b: SiteBrowserState): SiteBrowserState {
+    if (b.active_run && this.runs.isEphemeral(b.active_run)) {
+      b.active_check = b.active_run;
+      delete b.active_run;
+    }
+    return b;
   }
 
   private actions(site: string) {
@@ -637,12 +656,20 @@ export class Service {
       const origin = new URL(s.url).origin;
       const deadline = Date.now() + timeoutSecs * 1000;
       let last: { logged_in?: boolean; check_error?: string } = {};
+      // Check when a tab lands somewhere new on the site (the login just
+      // redirected back), otherwise at most every 30 s: sites often have
+      // their own login page on the same origin, and the human may sit there.
+      let checkedAt = 0;
+      let checkedUrls = "";
       while (Date.now() < deadline) {
         await new Promise(res => setTimeout(res, 3000));
         if (!this.peer) continue;
         const tabs = await this.ext<{ url?: string; status?: string }[]>("login.tabs", { site: name }).catch(() => []);
-        const back = tabs.some(t => t.status === "complete" && t.url && new URL(t.url).origin === origin);
-        if (!back) continue;
+        const onSite = tabs.filter(t => t.status === "complete" && t.url && new URL(t.url).origin === origin).map(t => t.url).sort().join(" ");
+        if (!onSite) continue;
+        if (onSite === checkedUrls && Date.now() - checkedAt < 30_000) continue;
+        checkedUrls = onSite;
+        checkedAt = Date.now();
         last = await this.status(name);
         if (last.logged_in) {
           store.audit(name, { event: "login.done" });
